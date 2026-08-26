@@ -3,13 +3,13 @@
 # pve-telegram-event.sh
 #
 # Proxmox VM/LXC state monitor
-# Version: 2.3.0
+# Version: 2.4.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="2.3.0"
+VERSION="2.4.0"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
 
@@ -110,7 +110,7 @@ get_name() {
 
 
 # ============================================================
-# Send state change notification
+# Send VM/LXC state notification
 # ============================================================
 
 send_state_change() {
@@ -135,11 +135,6 @@ send_state_change() {
         stop)
             emoji="🔴"
             action_text="종료"
-            ;;
-
-        reboot)
-            emoji="🔄"
-            action_text="재부팅"
             ;;
 
         *)
@@ -174,32 +169,89 @@ send_state_change() {
 
 
 # ============================================================
+# Send host notification
+# ============================================================
+
+send_host_state() {
+
+    local action="$1"
+
+    local emoji
+    local action_text
+
+    case "$action" in
+
+        start)
+            emoji="🟢"
+            action_text="시작"
+            ;;
+
+        stop)
+            emoji="🔴"
+            action_text="종료"
+            ;;
+
+        reboot)
+            emoji="🔄"
+            action_text="재부팅"
+            ;;
+
+        *)
+            emoji="🟠"
+            action_text="$action"
+            ;;
+
+    esac
+
+    local now
+    now=$(date '+%Y-%m-%d %H:%M:%S')
+
+    local message
+
+    message="${emoji} Proxmox 호스트 ${action_text}"
+    message+=$'\n'
+    message+=$'\n'
+    message+="Host · $(hostname)"
+    message+=$'\n'
+    message+="${now}"
+
+    if telegram_send "$message"; then
+
+        log "Host (${action_text}): notification sent"
+
+    else
+
+        log "ERROR: Failed to send Telegram host notification"
+
+    fi
+}
+
+
+# ============================================================
 # Parse Proxmox task start event
 #
-# IMPORTANT:
+# Only process "starting task UPID" lines.
 #
-# Proxmox writes several journal lines for one task.
+# A reboot is intentionally NOT handled as "reboot".
 #
-# Example:
+# qmreboot / vzreboot produces the actual shutdown/start
+# events as the guest is restarted.
 #
-#   starting task UPID:...:qmreboot:102:...
-#   requesting reboot of VM 102: UPID:...:qmreboot:102:...
-#   end task UPID:...:qmreboot:102:...
+# Therefore:
 #
-# We process ONLY the "starting task" line.
+#   reboot request
+#       ↓
+#   shutdown event → 🔴 종료
+#       ↓
+#   start event    → 🟢 시작
 #
-# This prevents duplicate Telegram notifications.
+# This gives the same result for both manual reboot and
+# host reboot/autostart.
 # ============================================================
 
 handle_event() {
 
     local line="$1"
-
-    # --------------------------------------------------------
-    # Only process actual task-start lines.
-    #
-    # This is the important change in 2.3.0.
-    # --------------------------------------------------------
 
     [[ "$line" == *"starting task UPID:"* ]] || return 0
 
@@ -231,11 +283,15 @@ handle_event() {
         id="${BASH_REMATCH[1]}"
         action="stop"
 
+    # --------------------------------------------------------
+    # Ignore qmreboot itself.
+    #
+    # The actual shutdown/start events are what we want.
+    # --------------------------------------------------------
+
     elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:qmreboot:([0-9]+): ]]; then
 
-        type="VM"
-        id="${BASH_REMATCH[1]}"
-        action="reboot"
+        return 0
 
 
     # --------------------------------------------------------
@@ -260,11 +316,13 @@ handle_event() {
         id="${BASH_REMATCH[1]}"
         action="stop"
 
+    # --------------------------------------------------------
+    # Ignore vzreboot itself.
+    # --------------------------------------------------------
+
     elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:vzreboot:([0-9]+): ]]; then
 
-        type="LXC"
-        id="${BASH_REMATCH[1]}"
-        action="reboot"
+        return 0
 
     else
 
@@ -272,10 +330,6 @@ handle_event() {
 
     fi
 
-
-    # --------------------------------------------------------
-    # Send notification
-    # --------------------------------------------------------
 
     send_state_change "$type" "$id" "$action"
 }
@@ -306,6 +360,55 @@ monitor() {
 
 
 # ============================================================
+# Host start
+#
+# Called by systemd after the monitor service starts.
+# The service unit should invoke this only after boot.
+# ============================================================
+
+host_start() {
+
+    load_config
+
+    send_host_state "start"
+}
+
+
+# ============================================================
+# Host stop
+#
+# Called by systemd while the host is shutting down.
+# The service unit will invoke this during shutdown.
+# ============================================================
+
+host_stop() {
+
+    load_config
+
+    send_host_state "stop"
+}
+
+
+# ============================================================
+# Host reboot
+#
+# Reserved for explicit reboot notification if needed later.
+# Normal host reboot will be represented as:
+#
+#   🔴 Proxmox 호스트 종료
+#   🟢 Proxmox 호스트 시작
+#
+# ============================================================
+
+host_reboot() {
+
+    load_config
+
+    send_host_state "reboot"
+}
+
+
+# ============================================================
 # Test
 # ============================================================
 
@@ -332,7 +435,7 @@ send_test() {
 
     else
 
-        log "ERROR: Failed to send test message."
+        log "ERROR: Failed to send Telegram test message."
         return 1
 
     fi
@@ -348,6 +451,21 @@ case "${1:-}" in
     --monitor)
 
         monitor
+        ;;
+
+    --host-start)
+
+        host_start
+        ;;
+
+    --host-stop)
+
+        host_stop
+        ;;
+
+    --host-reboot)
+
+        host_reboot
         ;;
 
     --test)
@@ -369,7 +487,16 @@ Proxmox VM/LXC Telegram Event Monitor ${VERSION}
 Usage:
 
   $0 --monitor
-      Monitor Proxmox VM/LXC start/stop/reboot events.
+      Monitor Proxmox VM/LXC start/stop events.
+
+  $0 --host-start
+      Send Proxmox host start notification.
+
+  $0 --host-stop
+      Send Proxmox host stop notification.
+
+  $0 --host-reboot
+      Send Proxmox host reboot notification.
 
   $0 --test
       Send a Telegram test message.
@@ -389,7 +516,7 @@ EOF
 
     *)
 
-        echo "Usage: $0 {--monitor|--test|--version|--help}"
+        echo "Usage: $0 {--monitor|--host-start|--host-stop|--host-reboot|--test|--version|--help}"
         exit 1
         ;;
 
