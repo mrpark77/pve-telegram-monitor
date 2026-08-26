@@ -1,40 +1,20 @@
-cat > /usr/local/bin/pve-telegram-event.sh <<'EOF'
 #!/usr/bin/env bash
 #
 # pve-telegram-event.sh
 #
-# Proxmox VM/LXC state monitor
-# Version: 1.0.0
+# Proxmox VM/LXC event -> Telegram notification
+# Version: 2.0.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.0.0"
+VERSION="2.0.0"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
-STATE_DIR="/var/lib/pve-telegram-monitor"
-STATE_FILE="${STATE_DIR}/vm-lxc-state"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
-
-CHECK_INTERVAL=10
-
-
-# ============================================================
-# Basic functions
-# ============================================================
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-}
-
-
-die() {
-    echo "ERROR: $*" >&2
-    exit 1
-}
 
 
 # ============================================================
@@ -44,18 +24,21 @@ die() {
 load_config() {
 
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        die "Configuration file not found: $CONFIG_FILE"
+        echo "ERROR: Configuration file not found: $CONFIG_FILE" >&2
+        exit 1
     fi
 
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
 
     if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-        die "TELEGRAM_BOT_TOKEN is not configured."
+        echo "ERROR: TELEGRAM_BOT_TOKEN is not configured." >&2
+        exit 1
     fi
 
     if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-        die "TELEGRAM_CHAT_ID is not configured."
+        echo "ERROR: TELEGRAM_CHAT_ID is not configured." >&2
+        exit 1
     fi
 }
 
@@ -80,38 +63,12 @@ telegram_send() {
 
 
 # ============================================================
-# State directory
+# Logging
 # ============================================================
 
-prepare_state_dir() {
+log() {
 
-    mkdir -p "$STATE_DIR"
-    chmod 700 "$STATE_DIR"
-}
-
-
-# ============================================================
-# Current VM/LXC state
-# ============================================================
-
-get_current_state() {
-
-    {
-        qm list 2>/dev/null |
-            awk '
-                NR > 1 && $1 ~ /^[0-9]+$/ {
-                    print "VM|" $1 "|" $2
-                }
-            '
-
-        pct list 2>/dev/null |
-            awk '
-                NR > 1 && $1 ~ /^[0-9]+$/ {
-                    print "LXC|" $1 "|" $2
-                }
-            '
-    } |
-    sort -t'|' -k1,1 -k2,2n
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
 
 
@@ -151,121 +108,158 @@ get_name() {
 
 
 # ============================================================
-# Send state change notification
+# Send state change
 # ============================================================
 
 send_state_change() {
 
     local type="$1"
     local id="$2"
-    local old_state="$3"
-    local new_state="$4"
+    local action="$3"
 
     local name
     name=$(get_name "$type" "$id")
 
     local emoji
-    local action
 
-    if [[ "$new_state" == "running" ]]; then
-        emoji="🟢"
-        action="시작"
-    elif [[ "$new_state" == "stopped" ]]; then
-        emoji="🔴"
-        action="종료"
-    else
-        emoji="🟠"
-        action="$new_state"
-    fi
+    case "$action" in
+        start)
+            emoji="🟢"
+            action_text="시작"
+            ;;
+        stop)
+            emoji="🔴"
+            action_text="종료"
+            ;;
+        reboot)
+            emoji="🔄"
+            action_text="재부팅"
+            ;;
+        *)
+            emoji="🟠"
+            action_text="$action"
+            ;;
+    esac
 
     local now
     now=$(date '+%Y-%m-%d %H:%M:%S')
 
-    local message=""
+    local message
 
-    message+="${emoji} ${type} ${action}"
+    message="${emoji} Proxmox ${type} ${action_text}"
     message+=$'\n'
     message+=$'\n'
     message+="${type} ${id} · ${name}"
     message+=$'\n'
     message+="${now}"
 
-    telegram_send "$message"
-
-    log "${type} ${id} (${name}): ${old_state} -> ${new_state}"
+    if telegram_send "$message"; then
+        log "${type} ${id} (${name}): ${action_text} notification sent"
+    else
+        log "ERROR: Failed to send Telegram notification for ${type} ${id}"
+    fi
 }
 
 
 # ============================================================
-# Compare states
+# Parse Proxmox pvedaemon event
 # ============================================================
 
-check_states() {
+handle_event() {
 
-    local current_file
-    current_file=$(mktemp)
+    local line="$1"
 
-    trap 'rm -f "$current_file"' RETURN
-
-    get_current_state > "$current_file"
+    local type=""
+    local id=""
+    local action=""
 
     # --------------------------------------------------------
-    # First run
+    # QEMU VM
     # --------------------------------------------------------
 
-    if [[ ! -f "$STATE_FILE" ]]; then
+    if [[ "$line" =~ qmstart:([0-9]+) ]]; then
 
-        cp "$current_file" "$STATE_FILE"
-        chmod 600 "$STATE_FILE"
+        type="VM"
+        id="${BASH_REMATCH[1]}"
+        action="start"
 
-        log "Initial VM/LXC state saved."
+    elif [[ "$line" =~ qmshutdown:([0-9]+) ]]; then
+
+        type="VM"
+        id="${BASH_REMATCH[1]}"
+        action="stop"
+
+    elif [[ "$line" =~ qmstop:([0-9]+) ]]; then
+
+        type="VM"
+        id="${BASH_REMATCH[1]}"
+        action="stop"
+
+    elif [[ "$line" =~ qmreboot:([0-9]+) ]]; then
+
+        type="VM"
+        id="${BASH_REMATCH[1]}"
+        action="reboot"
+
+
+    # --------------------------------------------------------
+    # LXC
+    # --------------------------------------------------------
+
+    elif [[ "$line" =~ vzstart:([0-9]+) ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="start"
+
+    elif [[ "$line" =~ vzstop:([0-9]+) ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="stop"
+
+    elif [[ "$line" =~ vzshutdown:([0-9]+) ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="stop"
+
+    elif [[ "$line" =~ vzreboot:([0-9]+) ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="reboot"
+
+    else
 
         return 0
     fi
 
-
-    # --------------------------------------------------------
-    # Compare existing resources
-    # --------------------------------------------------------
-
-    while IFS='|' read -r type id new_state; do
-
-        [[ -z "$type" ]] && continue
-        [[ -z "$id" ]] && continue
-
-        local old_state
-
-        old_state=$(awk -F'|' \
-            -v t="$type" \
-            -v i="$id" \
-            '$1 == t && $2 == i {print $3; exit}' \
-            "$STATE_FILE")
-
-        # New resource
-        if [[ -z "$old_state" ]]; then
-            continue
-        fi
-
-        # State changed
-        if [[ "$old_state" != "$new_state" ]]; then
-
-            send_state_change \
-                "$type" \
-                "$id" \
-                "$old_state" \
-                "$new_state"
-
-        fi
-
-    done < "$current_file"
+    send_state_change "$type" "$id" "$action"
+}
 
 
-    # --------------------------------------------------------
-    # Save current state
-    # --------------------------------------------------------
+# ============================================================
+# Monitor
+# ============================================================
 
-    cp "$current_file" "$STATE_FILE"
-    chmod 600 "$STATE_FILE"
+monitor() {
+
+    load_config
+
+    log "Proxmox VM/LXC event monitor started."
+    log "Mode: pvedaemon journal event monitoring"
+
+    journalctl \
+        -u pvedaemon \
+        -f \
+        -n 0 \
+        -o cat |
+    while IFS= read -r line; do
+
+        handle_event "$line"
+
+    done
 }
 
 
@@ -275,128 +269,70 @@ check_states() {
 
 send_test() {
 
+    load_config
+
     local now
     now=$(date '+%Y-%m-%d %H:%M:%S')
 
-    local message=""
+    local message
 
-    message+="🟢 Proxmox VM/LXC 이벤트 모니터 테스트"
+    message="🟢 Proxmox VM/LXC 이벤트 모니터 테스트"
     message+=$'\n'
     message+=$'\n'
     message+="시간: ${now}"
     message+=$'\n'
     message+=$'\n'
-    message+="VM/LXC 상태 감시가 정상적으로 실행되고 있습니다."
+    message+="이벤트 감시가 정상적으로 실행되고 있습니다."
 
-    telegram_send "$message"
-
-    log "Event monitor test message sent successfully."
+    if telegram_send "$message"; then
+        log "Test message sent successfully."
+    else
+        log "ERROR: Failed to send test message."
+        return 1
+    fi
 }
 
 
 # ============================================================
-# Main monitor loop
+# Version
 # ============================================================
 
-monitor() {
+case "${1:-}" in
 
-    load_config
-    prepare_state_dir
+    --monitor)
+        monitor
+        ;;
 
-    log "Proxmox VM/LXC event monitor started."
-    log "Check interval: ${CHECK_INTERVAL} seconds"
+    --test)
+        send_test
+        ;;
 
-    while true; do
+    --version)
+        echo "$VERSION"
+        ;;
 
-        check_states
+    --help|-h)
+        cat <<EOF
 
-        sleep "$CHECK_INTERVAL"
-
-    done
-}
-
-
-# ============================================================
-# Help
-# ============================================================
-
-usage() {
-
-    cat <<EOF
-
-Proxmox VM/LXC Event Monitor ${VERSION}
+Proxmox VM/LXC Telegram Event Monitor ${VERSION}
 
 Usage:
 
-  ${0} --monitor
-      Monitor VM/LXC state changes continuously.
+  $0 --monitor
+      Monitor Proxmox VM/LXC start/stop/reboot events.
 
-  ${0} --test
-      Send a Telegram connection test message.
+  $0 --test
+      Send a Telegram test message.
 
-  ${0} --version
-      Show script version.
-
-  ${0} --help
-      Show this help.
-
-Configuration:
-
-  ${CONFIG_FILE}
-
-State:
-
-  ${STATE_FILE}
+  $0 --version
+      Show version.
 
 EOF
-}
+        ;;
 
+    *)
+        echo "Usage: $0 {--monitor|--test|--version|--help}"
+        exit 1
+        ;;
 
-# ============================================================
-# Main
-# ============================================================
-
-main() {
-
-    case "${1:-}" in
-
-        --monitor)
-
-            monitor
-
-            ;;
-
-        --test)
-
-            load_config
-            send_test
-
-            ;;
-
-        --version)
-
-            echo "${VERSION}"
-
-            ;;
-
-        --help|-h)
-
-            usage
-
-            ;;
-
-        *)
-
-            usage
-            exit 1
-
-            ;;
-
-    esac
-}
-
-
-main "$@"
-EOF
-
-chmod +x /usr/local/bin/pve-telegram-event.sh
+esac
