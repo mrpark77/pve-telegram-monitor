@@ -3,13 +3,13 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.3.2
+# Version: 1.3.3
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.3.2"
+VERSION="1.3.3"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
 
@@ -562,35 +562,75 @@ get_disk_info() {
 # Proxmox storage
 # ============================================================
 
+format_kib() {
+
+    local kib="$1"
+
+    if [[ ! "$kib" =~ ^[0-9]+$ ]]; then
+        echo "-"
+        return
+    fi
+
+    awk -v k="$kib" 'BEGIN {
+
+        gb = k / 1024 / 1024
+
+        if (gb >= 1000)
+            printf "%.1f TB", gb / 1024
+        else if (gb >= 1)
+            printf "%.2f GB", gb
+        else
+            printf "%.0f MB", k / 1024
+
+    }'
+}
+
+
 get_storage_info() {
 
-    pvesm status 2>/dev/null |
-        awk '
-            NR > 1 && $1 !~ /^$/ {
+    local output
 
-                storage=$1
-                status=$3
-                total=$4
-                used=$5
-                avail=$6
-                percent=$7
+    output=$(pvesm status 2>/dev/null || true)
 
-                if (total ~ /^[0-9]+$/ && used ~ /^[0-9]+$/) {
+    if [[ -z "$output" ]]; then
+        echo "Storage 정보를 가져올 수 없습니다."
+        return
+    fi
 
-                    used_gb=used/1024/1024
-                    total_gb=total/1024/1024
 
-                    if (total > 0)
-                        percent_calc=(used/total)*100
-                    else
-                        percent_calc=0
+    while read -r name type status total used available percent; do
 
-                    printf "🟢 %s\n", storage
-                    printf "%.2f GB used / %.2f GB · %.2f%%\n",
-                           used_gb, total_gb, percent_calc
-                }
-            }
-        '
+        [[ "$name" == "Name" ]] && continue
+        [[ -z "$name" ]] && continue
+
+
+        local icon="🟢"
+
+        if [[ "$status" != "active" ]]; then
+            icon="🔴"
+        fi
+
+
+        local total_display
+        local used_display
+
+        total_display=$(format_kib "$total")
+        used_display=$(format_kib "$used")
+
+
+        if [[ "$percent" == "N/A" ]]; then
+
+            echo "${icon} ${name}"
+            echo "${used_display} used / ${total_display} · N/A"
+
+        else
+
+            echo "${icon} ${name}"
+            echo "${used_display} used / ${total_display} · ${percent}"
+
+        fi
+
+    done <<< "$output"
 }
 
 
