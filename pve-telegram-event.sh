@@ -3,13 +3,13 @@
 # pve-telegram-event.sh
 #
 # Proxmox VM/LXC event -> Telegram notification
-# Version: 2.0.0
+# Version: 2.1.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
 
@@ -248,16 +248,21 @@ monitor() {
     load_config
 
     log "Proxmox VM/LXC event monitor started."
-    log "Mode: pvedaemon journal event monitoring"
+    log "Mode: system journal event monitoring"
 
     journalctl \
-        -u pvedaemon \
         -f \
         -n 0 \
         -o cat |
     while IFS= read -r line; do
 
-        handle_event "$line"
+        # Only process Proxmox VM/LXC lifecycle events.
+        if [[ "$line" =~ qm(start|shutdown|stop|reboot):[0-9]+ ]] ||
+           [[ "$line" =~ vz(start|shutdown|stop|reboot):[0-9]+ ]]; then
+
+            handle_event "$line"
+
+        fi
 
     done
 }
