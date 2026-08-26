@@ -3,13 +3,13 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.3.1
+# Version: 1.3.2
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.3.1"
+VERSION="1.3.2"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
 
@@ -567,11 +567,13 @@ get_storage_info() {
     pvesm status 2>/dev/null |
         awk '
             NR > 1 && $1 !~ /^$/ {
+
                 storage=$1
-                type=$2
-                total=$5
-                used=$6
-                avail=$7
+                status=$3
+                total=$4
+                used=$5
+                avail=$6
+                percent=$7
 
                 if (total ~ /^[0-9]+$/ && used ~ /^[0-9]+$/) {
 
@@ -579,13 +581,13 @@ get_storage_info() {
                     total_gb=total/1024/1024
 
                     if (total > 0)
-                        percent=(used/total)*100
+                        percent_calc=(used/total)*100
                     else
-                        percent=0
+                        percent_calc=0
 
                     printf "🟢 %s\n", storage
                     printf "%.2f GB used / %.2f GB · %.2f%%\n",
-                           used_gb, total_gb, percent
+                           used_gb, total_gb, percent_calc
                 }
             }
         '
@@ -620,19 +622,89 @@ get_backup_directory() {
 
 get_backup_info() {
 
-    local backup_dir
+    local storage_cfg="/etc/pve/storage.cfg"
+    local backup_base=""
+    local backup_dir=""
 
-    backup_dir=$(get_backup_directory "backup-hdd")
+    # --------------------------------------------------------
+    # Find Proxmox backup storage path automatically
+    # --------------------------------------------------------
 
-    if [[ -z "$backup_dir" ]]; then
-        echo "backup-hdd 경로를 찾을 수 없습니다."
+    if [[ ! -f "$storage_cfg" ]]; then
+        echo "Proxmox Storage 설정을 찾을 수 없습니다."
         return
     fi
+
+    local current_storage=""
+    local current_type=""
+    local current_path=""
+    local current_content=""
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+
+        # New storage definition
+        if [[ "$line" =~ ^(dir|nfs|cifs):[[:space:]]+(.+)$ ]]; then
+
+            # Check previous storage
+            if [[ "$current_type" == "dir" ]] &&
+               [[ "$current_content" == *"backup"* ]] &&
+               [[ -n "$current_path" ]]; then
+
+                backup_base="$current_path"
+                break
+            fi
+
+            current_type="${BASH_REMATCH[1]}"
+            current_storage="${BASH_REMATCH[2]}"
+            current_path=""
+            current_content=""
+            continue
+        fi
+
+        # Storage path
+        if [[ "$line" =~ ^[[:space:]]+path[[:space:]]+(.+)$ ]]; then
+            current_path="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        # Storage content
+        if [[ "$line" =~ ^[[:space:]]+content[[:space:]]+(.+)$ ]]; then
+            current_content="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+    done < "$storage_cfg"
+
+    # Check final storage entry
+    if [[ -z "$backup_base" ]] &&
+       [[ "$current_type" == "dir" ]] &&
+       [[ "$current_content" == *"backup"* ]] &&
+       [[ -n "$current_path" ]]; then
+
+        backup_base="$current_path"
+    fi
+
+
+    # --------------------------------------------------------
+    # Validate backup path
+    # --------------------------------------------------------
+
+    if [[ -z "$backup_base" ]]; then
+        echo "백업 Storage를 찾을 수 없습니다."
+        return
+    fi
+
+    backup_dir="${backup_base%/}/dump"
 
     if [[ ! -d "$backup_dir" ]]; then
         echo "백업 디렉터리를 찾을 수 없습니다."
         return
     fi
+
+
+    # --------------------------------------------------------
+    # Find latest 5 actual backup files
+    # --------------------------------------------------------
 
     local files
 
@@ -649,6 +721,11 @@ get_backup_info() {
         return
     fi
 
+
+    # --------------------------------------------------------
+    # Display backup information
+    # --------------------------------------------------------
+
     while IFS='|' read -r timestamp file; do
 
         [[ -z "$file" ]] && continue
@@ -656,35 +733,124 @@ get_backup_info() {
         local filename
         filename=$(basename "$file")
 
+
+        # ----------------------------------------------------
+        # Backup date
+        # ----------------------------------------------------
+
         local date_text
         date_text=$(date -d "@${timestamp%.*}" '+%Y-%m-%d %H:%M')
+
+
+        # ----------------------------------------------------
+        # Backup size
+        # ----------------------------------------------------
 
         local size
         size=$(du -h "$file" 2>/dev/null |
             awk '{print $1}')
 
-        local status="🟢"
+        [[ -z "$size" ]] && size="Unknown"
+
+
+        # ----------------------------------------------------
+        # Identify VM / LXC
+        # ----------------------------------------------------
+
+        local backup_type="Unknown"
+        local vmid=""
+
+        if [[ "$filename" =~ ^vzdump-qemu-([0-9]+)- ]]; then
+
+            backup_type="VM"
+            vmid="${BASH_REMATCH[1]}"
+
+        elif [[ "$filename" =~ ^vzdump-lxc-([0-9]+)- ]]; then
+
+            backup_type="LXC"
+            vmid="${BASH_REMATCH[1]}"
+
+        fi
+
+
+        # ----------------------------------------------------
+        # Get VM / LXC name
+        # ----------------------------------------------------
+
+        local guest_name=""
+
+        if [[ "$backup_type" == "VM" ]] &&
+           [[ -n "$vmid" ]]; then
+
+            guest_name=$(qm config "$vmid" 2>/dev/null |
+                awk -F': ' '/^name:/ {
+                    print $2
+                    exit
+                }')
+
+        elif [[ "$backup_type" == "LXC" ]] &&
+             [[ -n "$vmid" ]]; then
+
+            guest_name=$(pct config "$vmid" 2>/dev/null |
+                awk -F': ' '/^hostname:/ {
+                    print $2
+                    exit
+                }')
+
+        fi
+
+
+        [[ -z "$guest_name" ]] && guest_name="ID ${vmid}"
+
+
+        # ----------------------------------------------------
+        # Check backup log
+        # ----------------------------------------------------
 
         local log_file=""
 
         if [[ "$file" == *.vma.zst ]]; then
             log_file="${file%.vma.zst}.log"
+
         elif [[ "$file" == *.tar.zst ]]; then
             log_file="${file%.tar.zst}.log"
         fi
 
-        if [[ -f "$log_file" ]]; then
+
+        local status="🟢"
+        local result_text="정상"
+
+        if [[ ! -f "$log_file" ]]; then
+
+            status="🟠"
+            result_text="로그 없음"
+
+        else
 
             if grep -qiE \
-                'error|failed|failure|vzdump.*error' \
+                'ERROR|FAILED|FAILURE|vzdump.*error|backup.*failed' \
                 "$log_file"; then
-                status="🔴"
-            fi
 
+                status="🔴"
+                result_text="실패"
+
+            elif grep -qiE \
+                'TASK ERROR|ERROR:|unable to|cannot' \
+                "$log_file"; then
+
+                status="🔴"
+                result_text="실패"
+
+            fi
         fi
 
-        echo "${status} ${date_text} · ${size}"
-        echo "${filename}"
+
+        # ----------------------------------------------------
+        # Output
+        # ----------------------------------------------------
+
+        echo "${status} ${date_text} · ${backup_type} ${vmid} · ${guest_name}"
+        echo "${size} · ${result_text}"
 
     done <<< "$files"
 }
