@@ -3,15 +3,19 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.3.4
+# Version: 1.4.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.3.4"
+VERSION="1.4.0"
 
-CONFIG_FILE="/etc/pve-telegram-monitor/config"
+CONFIG_DIR="/etc/pve-telegram-monitor"
+CONFIG_FILE="${CONFIG_DIR}/config"
+
+REPORT_SERVICE="/etc/systemd/system/pve-telegram-report.service"
+REPORT_TIMER="/etc/systemd/system/pve-telegram-report.timer"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -52,6 +56,133 @@ load_config() {
     fi
 }
 
+# ============================================================
+# Installation
+# ============================================================
+
+install_monitor() {
+
+    echo
+    echo "=============================================="
+    echo " Proxmox Telegram Monitor ${VERSION} 설치"
+    echo "=============================================="
+    echo
+
+    if [[ "$EUID" -ne 0 ]]; then
+        die "root 권한으로 실행해야 합니다."
+    fi
+
+    echo "Telegram Bot Token을 입력하세요."
+    read -r -p "Bot Token: " TELEGRAM_BOT_TOKEN
+
+    if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then
+        die "Bot Token이 입력되지 않았습니다."
+    fi
+
+    echo
+    echo "Telegram Chat ID를 입력하세요."
+    read -r -p "Chat ID: " TELEGRAM_CHAT_ID
+
+    if [[ -z "$TELEGRAM_CHAT_ID" ]]; then
+        die "Chat ID가 입력되지 않았습니다."
+    fi
+
+    echo
+    echo "매일 실행할 리포트 시간을 입력하세요."
+    echo "예: 09:00"
+    read -r -p "실행 시간 [09:00]: " REPORT_TIME
+
+    [[ -z "$REPORT_TIME" ]] && REPORT_TIME="09:00"
+
+    if [[ ! "$REPORT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        die "실행 시간 형식이 올바르지 않습니다. 예: 09:00"
+    fi
+
+    echo
+    echo "설정을 저장합니다..."
+
+    mkdir -p "$CONFIG_DIR"
+
+    cat > "$CONFIG_FILE" <<EOF
+TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID"
+EOF
+
+    chmod 600 "$CONFIG_FILE"
+
+    cat > "$REPORT_SERVICE" <<EOF
+[Unit]
+Description=Proxmox Telegram Daily Report
+After=network-online.target pve-guests.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pve-telegram-monitor.sh --report
+EOF
+
+    cat > "$REPORT_TIMER" <<EOF
+[Unit]
+Description=Run Proxmox Telegram Daily Report at ${REPORT_TIME}
+
+[Timer]
+OnCalendar=*-*-* ${REPORT_TIME}:00
+Persistent=true
+Unit=pve-telegram-report.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now pve-telegram-report.timer
+
+    echo
+    echo "=============================================="
+    echo " 설치가 완료되었습니다."
+    echo "=============================================="
+    echo
+    echo "Version       : ${VERSION}"
+    echo "Report time   : ${REPORT_TIME}"
+    echo "Config file   : ${CONFIG_FILE}"
+    echo "Timer         : pve-telegram-report.timer"
+    echo
+    echo "Telegram 연결 테스트:"
+    echo
+    echo "  ${0} --test"
+    echo
+}
+
+
+# ============================================================
+# Uninstallation
+# ============================================================
+
+uninstall_monitor() {
+
+    if [[ "$EUID" -ne 0 ]]; then
+        die "root 권한으로 실행해야 합니다."
+    fi
+
+    echo
+    echo "Proxmox Telegram Monitor를 제거합니다."
+    echo
+
+    systemctl disable --now pve-telegram-report.timer 2>/dev/null || true
+    systemctl stop pve-telegram-report.service 2>/dev/null || true
+
+    rm -f "$REPORT_TIMER"
+    rm -f "$REPORT_SERVICE"
+
+    rm -rf "$CONFIG_DIR"
+
+    systemctl daemon-reload
+    systemctl reset-failed
+
+    echo
+    echo "제거가 완료되었습니다."
+    echo
+}
 
 # ============================================================
 # Telegram
@@ -1275,6 +1406,14 @@ Proxmox Telegram Monitor ${VERSION}
 
 Usage:
 
+  ${0} --install
+      Install Proxmox Telegram Monitor.
+      Telegram Bot Token, Chat ID and daily report time
+      will be configured interactively.
+
+  ${0} --uninstall
+      Uninstall the daily report timer and configuration.
+
   ${0} --report
       Generate and send the daily Proxmox report.
 
@@ -1291,10 +1430,17 @@ Configuration:
 
   ${CONFIG_FILE}
 
-Example:
+Installation:
 
-  TELEGRAM_BOT_TOKEN="123456789:ABCDEF..."
-  TELEGRAM_CHAT_ID="-1001234567890"
+  ${0} --install
+
+Configuration:
+
+  ${CONFIG_FILE}
+
+Daily report:
+
+  The report schedule is configured during installation.
 
 EOF
 }
@@ -1307,6 +1453,18 @@ EOF
 main() {
 
     case "${1:-}" in
+
+        --install)
+
+            install_monitor
+
+            ;;
+
+        --uninstall)
+
+            uninstall_monitor
+
+            ;;
 
         --report)
 
