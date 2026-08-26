@@ -562,75 +562,37 @@ get_disk_info() {
 # Proxmox storage
 # ============================================================
 
-format_kib() {
-
-    local kib="$1"
-
-    if [[ ! "$kib" =~ ^[0-9]+$ ]]; then
-        echo "-"
-        return
-    fi
-
-    awk -v k="$kib" 'BEGIN {
-
-        gb = k / 1024 / 1024
-
-        if (gb >= 1000)
-            printf "%.1f TB", gb / 1024
-        else if (gb >= 1)
-            printf "%.2f GB", gb
-        else
-            printf "%.0f MB", k / 1024
-
-    }'
-}
-
-
 get_storage_info() {
 
-    local output
+    pvesm status 2>/dev/null |
+        awk '
+            NR > 1 && $1 !~ /^$/ {
 
-    output=$(pvesm status 2>/dev/null || true)
+                storage=$1
+                total=$5
+                used=$6
 
-    if [[ -z "$output" ]]; then
-        echo "Storage 정보를 가져올 수 없습니다."
-        return
-    fi
+                if (total ~ /^[0-9]+$/ && used ~ /^[0-9]+$/) {
 
+                    used_gb=used/1024/1024
+                    total_gb=total/1024/1024
 
-    while read -r name type status total used available percent; do
+                    if (total > 0)
+                        percent=(used/total)*100
+                    else
+                        percent=0
 
-        [[ "$name" == "Name" ]] && continue
-        [[ -z "$name" ]] && continue
+                    printf "🟢 %s\n", storage
 
-
-        local icon="🟢"
-
-        if [[ "$status" != "active" ]]; then
-            icon="🔴"
-        fi
-
-
-        local total_display
-        local used_display
-
-        total_display=$(format_kib "$total")
-        used_display=$(format_kib "$used")
-
-
-        if [[ "$percent" == "N/A" ]]; then
-
-            echo "${icon} ${name}"
-            echo "${used_display} used / ${total_display} · N/A"
-
-        else
-
-            echo "${icon} ${name}"
-            echo "${used_display} used / ${total_display} · ${percent}"
-
-        fi
-
-    done <<< "$output"
+                    if (total_gb >= 100)
+                        printf "%.1f GB used / %.1f GB · %.2f%%\n",
+                            used_gb, total_gb, percent
+                    else
+                        printf "%.2f GB used / %.2f GB · %.2f%%\n",
+                            used_gb, total_gb, percent
+                }
+            }
+        '
 }
 
 
