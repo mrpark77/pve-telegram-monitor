@@ -506,9 +506,6 @@ EOF
     # Start notification service
     # --------------------------------------------------------
 
-    systemctl start "${HOST_START_SERVICE}"
-
-
     log "Installation completed."
     log "Version: ${VERSION}"
 
