@@ -3,19 +3,15 @@
 # pve-telegram-event.sh
 #
 # Proxmox VM/LXC state monitor
-# Version: 2.2.0
+# Version: 2.3.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
-
-# Prevent duplicate start notification after reboot.
-REBOOT_STATE_DIR="/var/lib/pve-telegram-monitor"
-REBOOT_STATE_FILE="${REBOOT_STATE_DIR}/reboot-state"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -79,20 +75,6 @@ telegram_send() {
 
 
 # ============================================================
-# State directory
-# ============================================================
-
-prepare_state_dir() {
-
-    mkdir -p "$REBOOT_STATE_DIR"
-    chmod 700 "$REBOOT_STATE_DIR"
-
-    touch "$REBOOT_STATE_FILE"
-    chmod 600 "$REBOOT_STATE_FILE"
-}
-
-
-# ============================================================
 # Get VM/LXC name
 # ============================================================
 
@@ -124,52 +106,6 @@ get_name() {
     [[ -z "$name" ]] && name="Unknown"
 
     echo "$name"
-}
-
-
-# ============================================================
-# Reboot state
-# ============================================================
-
-mark_reboot() {
-
-    local type="$1"
-    local id="$2"
-
-    local key="${type}|${id}"
-
-    grep -Fqx "$key" "$REBOOT_STATE_FILE" 2>/dev/null || {
-        echo "$key" >> "$REBOOT_STATE_FILE"
-    }
-}
-
-
-is_rebooting() {
-
-    local type="$1"
-    local id="$2"
-
-    local key="${type}|${id}"
-
-    grep -Fqx "$key" "$REBOOT_STATE_FILE" 2>/dev/null
-}
-
-
-clear_reboot() {
-
-    local type="$1"
-    local id="$2"
-
-    local key="${type}|${id}"
-
-    if [[ ! -f "$REBOOT_STATE_FILE" ]]; then
-        return 0
-    fi
-
-    grep -Fvx "$key" "$REBOOT_STATE_FILE" > "${REBOOT_STATE_FILE}.tmp" || true
-
-    mv "${REBOOT_STATE_FILE}.tmp" "$REBOOT_STATE_FILE"
-    chmod 600 "$REBOOT_STATE_FILE"
 }
 
 
@@ -238,142 +174,110 @@ send_state_change() {
 
 
 # ============================================================
-# Handle VM/LXC event
+# Parse Proxmox task start event
+#
+# IMPORTANT:
+#
+# Proxmox writes several journal lines for one task.
+#
+# Example:
+#
+#   starting task UPID:...:qmreboot:102:...
+#   requesting reboot of VM 102: UPID:...:qmreboot:102:...
+#   end task UPID:...:qmreboot:102:...
+#
+# We process ONLY the "starting task" line.
+#
+# This prevents duplicate Telegram notifications.
 # ============================================================
 
 handle_event() {
 
     local line="$1"
 
+    # --------------------------------------------------------
+    # Only process actual task-start lines.
+    #
+    # This is the important change in 2.3.0.
+    # --------------------------------------------------------
+
+    [[ "$line" == *"starting task UPID:"* ]] || return 0
+
+
     local type=""
     local id=""
     local action=""
+
 
     # --------------------------------------------------------
     # QEMU VM
     # --------------------------------------------------------
 
-    if [[ "$line" =~ qmreboot:([0-9]+) ]]; then
-
-        type="VM"
-        id="${BASH_REMATCH[1]}"
-        action="reboot"
-
-        # Mark this VM so the following qmstart is ignored.
-        mark_reboot "$type" "$id"
-
-        send_state_change "$type" "$id" "$action"
-
-        return 0
-
-
-    elif [[ "$line" =~ qmstart:([0-9]+) ]]; then
+    if [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:qmstart:([0-9]+): ]]; then
 
         type="VM"
         id="${BASH_REMATCH[1]}"
         action="start"
 
-        # qmstart immediately following qmreboot is not a new event.
-        if is_rebooting "$type" "$id"; then
-
-            clear_reboot "$type" "$id"
-
-            log "VM ${id}: qmstart ignored because it follows qmreboot"
-
-            return 0
-
-        fi
-
-        send_state_change "$type" "$id" "$action"
-
-        return 0
-
-
-    elif [[ "$line" =~ qmshutdown:([0-9]+) ]]; then
+    elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:qmshutdown:([0-9]+): ]]; then
 
         type="VM"
         id="${BASH_REMATCH[1]}"
         action="stop"
 
-        send_state_change "$type" "$id" "$action"
-
-        return 0
-
-
-    elif [[ "$line" =~ qmstop:([0-9]+) ]]; then
+    elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:qmstop:([0-9]+): ]]; then
 
         type="VM"
         id="${BASH_REMATCH[1]}"
         action="stop"
 
-        send_state_change "$type" "$id" "$action"
+    elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:qmreboot:([0-9]+): ]]; then
 
-        return 0
+        type="VM"
+        id="${BASH_REMATCH[1]}"
+        action="reboot"
 
 
     # --------------------------------------------------------
     # LXC
     # --------------------------------------------------------
 
-    elif [[ "$line" =~ vzreboot:([0-9]+) ]]; then
-
-        type="LXC"
-        id="${BASH_REMATCH[1]}"
-        action="reboot"
-
-        mark_reboot "$type" "$id"
-
-        send_state_change "$type" "$id" "$action"
-
-        return 0
-
-
-    elif [[ "$line" =~ vzstart:([0-9]+) ]]; then
+    elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:vzstart:([0-9]+): ]]; then
 
         type="LXC"
         id="${BASH_REMATCH[1]}"
         action="start"
 
-        if is_rebooting "$type" "$id"; then
-
-            clear_reboot "$type" "$id"
-
-            log "LXC ${id}: vzstart ignored because it follows vzreboot"
-
-            return 0
-
-        fi
-
-        send_state_change "$type" "$id" "$action"
-
-        return 0
-
-
-    elif [[ "$line" =~ vzshutdown:([0-9]+) ]]; then
+    elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:vzshutdown:([0-9]+): ]]; then
 
         type="LXC"
         id="${BASH_REMATCH[1]}"
         action="stop"
 
-        send_state_change "$type" "$id" "$action"
-
-        return 0
-
-
-    elif [[ "$line" =~ vzstop:([0-9]+) ]]; then
+    elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:vzstop:([0-9]+): ]]; then
 
         type="LXC"
         id="${BASH_REMATCH[1]}"
         action="stop"
 
-        send_state_change "$type" "$id" "$action"
+    elif [[ "$line" =~ starting\ task\ UPID:[^:]+:[^:]+:[^:]+:[^:]+:vzreboot:([0-9]+): ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="reboot"
+
+    else
 
         return 0
 
     fi
 
 
-    return 0
+    # --------------------------------------------------------
+    # Send notification
+    # --------------------------------------------------------
+
+    send_state_change "$type" "$id" "$action"
 }
 
 
@@ -384,7 +288,6 @@ handle_event() {
 monitor() {
 
     load_config
-    prepare_state_dir
 
     log "Proxmox VM/LXC event monitor started."
     log "Mode: system journal event monitoring"
@@ -396,13 +299,7 @@ monitor() {
         -o cat |
     while IFS= read -r line; do
 
-        # Only process Proxmox VM/LXC lifecycle events.
-        if [[ "$line" =~ qm(start|shutdown|stop|reboot):[0-9]+ ]] ||
-           [[ "$line" =~ vz(start|shutdown|stop|reboot):[0-9]+ ]]; then
-
-            handle_event "$line"
-
-        fi
+        handle_event "$line"
 
     done
 }
@@ -424,8 +321,6 @@ send_test() {
     message="🟢 Proxmox VM/LXC 이벤트 모니터 테스트"
     message+=$'\n'
     message+=$'\n'
-    message+="버전: ${VERSION}"
-    message+=$'\n'
     message+="시간: ${now}"
     message+=$'\n'
     message+=$'\n'
@@ -437,8 +332,7 @@ send_test() {
 
     else
 
-        log "ERROR: Failed to send Telegram test message."
-
+        log "ERROR: Failed to send test message."
         return 1
 
     fi
@@ -446,7 +340,7 @@ send_test() {
 
 
 # ============================================================
-# Main
+# Version / Help
 # ============================================================
 
 case "${1:-}" in
@@ -482,6 +376,13 @@ Usage:
 
   $0 --version
       Show version.
+
+  $0 --help
+      Show this help.
+
+Configuration:
+
+  ${CONFIG_FILE}
 
 EOF
         ;;
