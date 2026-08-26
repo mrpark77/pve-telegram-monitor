@@ -2,19 +2,38 @@
 #
 # pve-telegram-event.sh
 #
-# Proxmox VM/LXC event -> Telegram notification
-# Version: 2.1.0
+# Proxmox VM/LXC state monitor
+# Version: 2.2.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
 
+# Prevent duplicate start notification after reboot.
+REBOOT_STATE_DIR="/var/lib/pve-telegram-monitor"
+REBOOT_STATE_FILE="${REBOOT_STATE_DIR}/reboot-state"
+
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
+
+
+# ============================================================
+# Basic functions
+# ============================================================
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
 
 
 # ============================================================
@@ -24,21 +43,18 @@ TELEGRAM_CHAT_ID=""
 load_config() {
 
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo "ERROR: Configuration file not found: $CONFIG_FILE" >&2
-        exit 1
+        die "Configuration file not found: $CONFIG_FILE"
     fi
 
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
 
     if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-        echo "ERROR: TELEGRAM_BOT_TOKEN is not configured." >&2
-        exit 1
+        die "TELEGRAM_BOT_TOKEN is not configured."
     fi
 
     if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-        echo "ERROR: TELEGRAM_CHAT_ID is not configured." >&2
-        exit 1
+        die "TELEGRAM_CHAT_ID is not configured."
     fi
 }
 
@@ -63,12 +79,16 @@ telegram_send() {
 
 
 # ============================================================
-# Logging
+# State directory
 # ============================================================
 
-log() {
+prepare_state_dir() {
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    mkdir -p "$REBOOT_STATE_DIR"
+    chmod 700 "$REBOOT_STATE_DIR"
+
+    touch "$REBOOT_STATE_FILE"
+    chmod 600 "$REBOOT_STATE_FILE"
 }
 
 
@@ -108,7 +128,53 @@ get_name() {
 
 
 # ============================================================
-# Send state change
+# Reboot state
+# ============================================================
+
+mark_reboot() {
+
+    local type="$1"
+    local id="$2"
+
+    local key="${type}|${id}"
+
+    grep -Fqx "$key" "$REBOOT_STATE_FILE" 2>/dev/null || {
+        echo "$key" >> "$REBOOT_STATE_FILE"
+    }
+}
+
+
+is_rebooting() {
+
+    local type="$1"
+    local id="$2"
+
+    local key="${type}|${id}"
+
+    grep -Fqx "$key" "$REBOOT_STATE_FILE" 2>/dev/null
+}
+
+
+clear_reboot() {
+
+    local type="$1"
+    local id="$2"
+
+    local key="${type}|${id}"
+
+    if [[ ! -f "$REBOOT_STATE_FILE" ]]; then
+        return 0
+    fi
+
+    grep -Fvx "$key" "$REBOOT_STATE_FILE" > "${REBOOT_STATE_FILE}.tmp" || true
+
+    mv "${REBOOT_STATE_FILE}.tmp" "$REBOOT_STATE_FILE"
+    chmod 600 "$REBOOT_STATE_FILE"
+}
+
+
+# ============================================================
+# Send state change notification
 # ============================================================
 
 send_state_change() {
@@ -121,24 +187,30 @@ send_state_change() {
     name=$(get_name "$type" "$id")
 
     local emoji
+    local action_text
 
     case "$action" in
+
         start)
             emoji="🟢"
             action_text="시작"
             ;;
+
         stop)
             emoji="🔴"
             action_text="종료"
             ;;
+
         reboot)
             emoji="🔄"
             action_text="재부팅"
             ;;
+
         *)
             emoji="🟠"
             action_text="$action"
             ;;
+
     esac
 
     local now
@@ -154,15 +226,19 @@ send_state_change() {
     message+="${now}"
 
     if telegram_send "$message"; then
+
         log "${type} ${id} (${name}): ${action_text} notification sent"
+
     else
+
         log "ERROR: Failed to send Telegram notification for ${type} ${id}"
+
     fi
 }
 
 
 # ============================================================
-# Parse Proxmox pvedaemon event
+# Handle VM/LXC event
 # ============================================================
 
 handle_event() {
@@ -177,11 +253,41 @@ handle_event() {
     # QEMU VM
     # --------------------------------------------------------
 
-    if [[ "$line" =~ qmstart:([0-9]+) ]]; then
+    if [[ "$line" =~ qmreboot:([0-9]+) ]]; then
+
+        type="VM"
+        id="${BASH_REMATCH[1]}"
+        action="reboot"
+
+        # Mark this VM so the following qmstart is ignored.
+        mark_reboot "$type" "$id"
+
+        send_state_change "$type" "$id" "$action"
+
+        return 0
+
+
+    elif [[ "$line" =~ qmstart:([0-9]+) ]]; then
 
         type="VM"
         id="${BASH_REMATCH[1]}"
         action="start"
+
+        # qmstart immediately following qmreboot is not a new event.
+        if is_rebooting "$type" "$id"; then
+
+            clear_reboot "$type" "$id"
+
+            log "VM ${id}: qmstart ignored because it follows qmreboot"
+
+            return 0
+
+        fi
+
+        send_state_change "$type" "$id" "$action"
+
+        return 0
+
 
     elif [[ "$line" =~ qmshutdown:([0-9]+) ]]; then
 
@@ -189,40 +295,25 @@ handle_event() {
         id="${BASH_REMATCH[1]}"
         action="stop"
 
+        send_state_change "$type" "$id" "$action"
+
+        return 0
+
+
     elif [[ "$line" =~ qmstop:([0-9]+) ]]; then
 
         type="VM"
         id="${BASH_REMATCH[1]}"
         action="stop"
 
-    elif [[ "$line" =~ qmreboot:([0-9]+) ]]; then
+        send_state_change "$type" "$id" "$action"
 
-        type="VM"
-        id="${BASH_REMATCH[1]}"
-        action="reboot"
+        return 0
 
 
     # --------------------------------------------------------
     # LXC
     # --------------------------------------------------------
-
-    elif [[ "$line" =~ vzstart:([0-9]+) ]]; then
-
-        type="LXC"
-        id="${BASH_REMATCH[1]}"
-        action="start"
-
-    elif [[ "$line" =~ vzstop:([0-9]+) ]]; then
-
-        type="LXC"
-        id="${BASH_REMATCH[1]}"
-        action="stop"
-
-    elif [[ "$line" =~ vzshutdown:([0-9]+) ]]; then
-
-        type="LXC"
-        id="${BASH_REMATCH[1]}"
-        action="stop"
 
     elif [[ "$line" =~ vzreboot:([0-9]+) ]]; then
 
@@ -230,12 +321,59 @@ handle_event() {
         id="${BASH_REMATCH[1]}"
         action="reboot"
 
-    else
+        mark_reboot "$type" "$id"
+
+        send_state_change "$type" "$id" "$action"
 
         return 0
+
+
+    elif [[ "$line" =~ vzstart:([0-9]+) ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="start"
+
+        if is_rebooting "$type" "$id"; then
+
+            clear_reboot "$type" "$id"
+
+            log "LXC ${id}: vzstart ignored because it follows vzreboot"
+
+            return 0
+
+        fi
+
+        send_state_change "$type" "$id" "$action"
+
+        return 0
+
+
+    elif [[ "$line" =~ vzshutdown:([0-9]+) ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="stop"
+
+        send_state_change "$type" "$id" "$action"
+
+        return 0
+
+
+    elif [[ "$line" =~ vzstop:([0-9]+) ]]; then
+
+        type="LXC"
+        id="${BASH_REMATCH[1]}"
+        action="stop"
+
+        send_state_change "$type" "$id" "$action"
+
+        return 0
+
     fi
 
-    send_state_change "$type" "$id" "$action"
+
+    return 0
 }
 
 
@@ -246,9 +384,11 @@ handle_event() {
 monitor() {
 
     load_config
+    prepare_state_dir
 
     log "Proxmox VM/LXC event monitor started."
     log "Mode: system journal event monitoring"
+    log "Version: ${VERSION}"
 
     journalctl \
         -f \
@@ -284,39 +424,50 @@ send_test() {
     message="🟢 Proxmox VM/LXC 이벤트 모니터 테스트"
     message+=$'\n'
     message+=$'\n'
+    message+="버전: ${VERSION}"
+    message+=$'\n'
     message+="시간: ${now}"
     message+=$'\n'
     message+=$'\n'
     message+="이벤트 감시가 정상적으로 실행되고 있습니다."
 
     if telegram_send "$message"; then
+
         log "Test message sent successfully."
+
     else
-        log "ERROR: Failed to send test message."
+
+        log "ERROR: Failed to send Telegram test message."
+
         return 1
+
     fi
 }
 
 
 # ============================================================
-# Version
+# Main
 # ============================================================
 
 case "${1:-}" in
 
     --monitor)
+
         monitor
         ;;
 
     --test)
+
         send_test
         ;;
 
     --version)
+
         echo "$VERSION"
         ;;
 
     --help|-h)
+
         cat <<EOF
 
 Proxmox VM/LXC Telegram Event Monitor ${VERSION}
@@ -336,6 +487,7 @@ EOF
         ;;
 
     *)
+
         echo "Usage: $0 {--monitor|--test|--version|--help}"
         exit 1
         ;;
