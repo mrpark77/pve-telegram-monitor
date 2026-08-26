@@ -3,15 +3,16 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.1.0
+# Version: 1.2.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 CONFIG_FILE="/etc/pve-telegram-monitor/config"
+STORAGE_CONFIG="/etc/pve/storage.cfg"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -152,7 +153,26 @@ get_vm_ip() {
             | .["ip-address"]
         ' 2>/dev/null |
         grep -v '^127\.' |
+        grep -v '^169\.254\.' |
         head -n 1
+}
+
+
+get_vm_mac() {
+
+    local vmid="$1"
+
+    qm config "$vmid" 2>/dev/null |
+        awk '
+            /^net[0-9]+:/ {
+                if (match($0, /virtio=[^,]+|e1000=[^,]+|vmxnet3=[^,]+|rtl8139=[^,]+/)) {
+                    value=substr($0, RSTART, RLENGTH)
+                    sub(/^[^=]+=/, "", value)
+                    print value
+                    exit
+                }
+            }
+        '
 }
 
 
@@ -166,8 +186,8 @@ get_vm_info() {
     local name
     local cores
     local memory
-    local mac
     local ip
+    local mac
 
     name=$(echo "$config" |
         awk -F': ' '/^name:/ {print $2; exit}')
@@ -178,38 +198,38 @@ get_vm_info() {
     memory=$(echo "$config" |
         awk -F': ' '/^memory:/ {print $2; exit}')
 
-    mac=$(echo "$config" |
-        awk '/^net[0-9]+:/ {
-            for (i=1;i<=NF;i++) {
-                if ($i ~ /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/) {
-                    print $i
-                    exit
-                }
-            }
-        }')
-
     ip=$(get_vm_ip "$vmid")
+    mac=$(get_vm_mac "$vmid")
 
     [[ -z "$name" ]] && name="Unknown"
     [[ -z "$cores" ]] && cores="-"
     [[ -z "$memory" ]] && memory="-"
-    [[ -z "$mac" ]] && mac="-"
     [[ -z "$ip" ]] && ip="-"
+    [[ -z "$mac" ]] && mac="-"
 
     local ram_display
 
     if [[ "$memory" =~ ^[0-9]+$ ]]; then
+
         ram_display="$(awk -v m="$memory" 'BEGIN {
             if (m >= 1024)
                 printf "%.0f GB", m/1024;
             else
                 printf "%d MB", m;
         }')"
+
     else
+
         ram_display="$memory"
+
     fi
 
-    local disks=""
+
+    echo "🟢 VM ${vmid} · ${name}"
+    echo "CPU ${cores} Core · RAM ${ram_display}"
+    echo "IP ${ip}"
+    echo "MAC ${mac}"
+
 
     while IFS= read -r line; do
 
@@ -217,14 +237,13 @@ get_vm_info() {
 
         local disk_name
         local disk_value
+        local storage
+        local size
 
         disk_name=$(echo "$line" | cut -d: -f1)
         disk_value=$(echo "$line" | cut -d: -f2-)
 
         if [[ "$disk_name" =~ ^(scsi|sata|virtio|ide)[0-9]+$ ]]; then
-
-            local storage
-            local size
 
             storage=$(echo "$disk_value" |
                 sed -n 's/^\([^:]*\):.*/\1/p')
@@ -233,30 +252,35 @@ get_vm_info() {
                 sed -n 's/.*size=\([^,]*\).*/\1/p')
 
             if [[ -n "$storage" && -n "$size" ]]; then
-
-                if [[ -n "$disks" ]]; then
-                    disks+=$'\n'
-                fi
-
-                disks+="Disk: ${storage} · ${size}"
+                echo "Disk: ${storage} · ${size}"
             fi
+
         fi
 
     done <<< "$config"
-
-    [[ -z "$disks" ]] && disks="Disk: -"
-
-    echo "🟢 VM ${vmid} · ${name}"
-    echo "CPU ${cores} Core · RAM ${ram_display}"
-    echo "IP ${ip}"
-    echo "MAC ${mac}"
-    echo "$disks"
 }
 
 
 # ============================================================
 # LXC information
 # ============================================================
+
+get_lxc_ip() {
+
+    local ctid="$1"
+
+    pct exec "$ctid" -- ip -4 addr show 2>/dev/null |
+        awk '
+            /inet / {
+                split($2,a,"/")
+                if (a[1] != "127.0.0.1" && a[1] !~ /^169\.254\./) {
+                    print a[1]
+                    exit
+                }
+            }
+        '
+}
+
 
 get_lxc_info() {
 
@@ -293,21 +317,7 @@ get_lxc_info() {
             }
         ')
 
-    ip=$(echo "$config" |
-        awk '
-            /^net[0-9]+:/ {
-                match($0, /ip=[^,]+/)
-                if (RSTART) {
-                    value=substr($0, RSTART, RLENGTH)
-                    sub(/^ip=/, "", value)
-                    sub(/\/.*/, "", value)
-                    if (value != "dhcp") {
-                        print value
-                        exit
-                    }
-                }
-            }
-        ')
+    ip=$(get_lxc_ip "$ctid")
 
     [[ -z "$hostname" ]] && hostname="Unknown"
     [[ -z "$cores" ]] && cores="-"
@@ -319,6 +329,7 @@ get_lxc_info() {
     echo "CPU ${cores} Core · RAM ${memory} MB"
     echo "IP ${ip}"
     echo "MAC ${mac}"
+
 
     local rootfs
 
@@ -339,6 +350,7 @@ get_lxc_info() {
         if [[ -n "$storage" && -n "$size" ]]; then
             echo "Disk: ${storage} · ${size}"
         fi
+
     fi
 }
 
@@ -361,9 +373,6 @@ smart_status() {
         return
     fi
 
-    # --------------------------------------------------------
-    # Immediate critical conditions
-    # --------------------------------------------------------
 
     local reallocated
     local pending
@@ -371,6 +380,8 @@ smart_status() {
     local reported_uncorrect
     local media_errors
     local critical_warning
+    local crc
+
 
     reallocated=$(echo "$output" |
         awk '$1 == 5 {print $10; exit}')
@@ -383,6 +394,10 @@ smart_status() {
 
     reported_uncorrect=$(echo "$output" |
         awk '$1 == 187 {print $10; exit}')
+
+    crc=$(echo "$output" |
+        awk '$1 == 199 {print $10; exit}')
+
 
     media_errors=$(echo "$output" |
         awk -F: '/Media and Data Integrity Errors:/ {
@@ -398,11 +413,13 @@ smart_status() {
             exit
         }')
 
+
     if [[ "$critical_warning" =~ ^0x ]] &&
        [[ "$critical_warning" != "0x00" ]]; then
         echo "🔴"
         return
     fi
+
 
     if [[ "$media_errors" =~ ^[0-9]+$ ]] &&
        (( media_errors > 0 )); then
@@ -410,11 +427,13 @@ smart_status() {
         return
     fi
 
+
     if [[ "$pending" =~ ^[0-9]+$ ]] &&
        (( pending > 0 )); then
         echo "🔴"
         return
     fi
+
 
     if [[ "$offline_uncorrectable" =~ ^[0-9]+$ ]] &&
        (( offline_uncorrectable > 0 )); then
@@ -422,11 +441,13 @@ smart_status() {
         return
     fi
 
+
     if [[ "$reported_uncorrect" =~ ^[0-9]+$ ]] &&
        (( reported_uncorrect > 0 )); then
         echo "🔴"
         return
     fi
+
 
     if [[ "$reallocated" =~ ^[0-9]+$ ]] &&
        (( reallocated > 0 )); then
@@ -434,20 +455,13 @@ smart_status() {
         return
     fi
 
-    # --------------------------------------------------------
-    # CRC errors
-    # --------------------------------------------------------
-
-    local crc
-
-    crc=$(echo "$output" |
-        awk '$1 == 199 {print $10; exit}')
 
     if [[ "$crc" =~ ^[0-9]+$ ]] &&
        (( crc > 0 )); then
         echo "🟠"
         return
     fi
+
 
     echo "🟢"
 }
@@ -465,6 +479,7 @@ get_disk_model() {
                 print $2
                 exit
             }
+
             /Model Number:/ {
                 gsub(/^[ \t]+/, "", $2)
                 print $2
@@ -484,17 +499,22 @@ get_disk_size() {
             /User Capacity:/ {
                 value=$2
                 sub(/^[ \t]+/, "", value)
+
                 match(value, /\[[^]]+\]/)
+
                 if (RSTART) {
                     size=substr(value, RSTART+1, RLENGTH-2)
                     print size
                     exit
                 }
             }
+
             /Namespace 1 Size\/Capacity:/ {
                 value=$2
                 sub(/^[ \t]+/, "", value)
+
                 match(value, /\[[^]]+\]/)
+
                 if (RSTART) {
                     size=substr(value, RSTART+1, RLENGTH-2)
                     print size
@@ -505,17 +525,59 @@ get_disk_size() {
 }
 
 
+get_disk_size_display() {
+
+    local device="$1"
+    local type="$2"
+
+    local raw
+
+    raw=$(get_disk_size "$device" "$type")
+
+    if [[ -z "$raw" ]]; then
+        echo "Unknown"
+        return
+    fi
+
+
+    local bytes
+
+    bytes=$(echo "$raw" |
+        awk '
+            {
+                value=$0
+
+                if (value ~ /TB$/) {
+                    sub(/ TB$/, "", value)
+                    printf "%.2f TB", value
+                }
+                else if (value ~ /GB$/) {
+                    sub(/ GB$/, "", value)
+                    printf "%.0f GB", value
+                }
+                else {
+                    print value
+                }
+            }
+        ')
+
+    echo "$bytes"
+}
+
+
 get_disk_rotation() {
 
     local device="$1"
     local type="$2"
 
     smartctl -a -d "$type" "$device" 2>/dev/null |
-        awk -F: '/Rotation Rate:/ {
-            gsub(/^[ \t]+/, "", $2)
-            print $2
-            exit
-        }'
+        awk -F: '
+            /Rotation Rate:/ {
+                gsub(/^[ \t]+/, "", $2)
+                print $2
+                exit
+            }
+        '
 }
 
 
@@ -531,18 +593,24 @@ get_disk_info() {
 
     status=$(smart_status "$device" "$type")
     model=$(get_disk_model "$device" "$type")
-    size=$(get_disk_size "$device" "$type")
+    size=$(get_disk_size_display "$device" "$type")
     rotation=$(get_disk_rotation "$device" "$type")
 
+
     [[ -z "$model" ]] && model="Unknown"
-    [[ -z "$size" ]] && size="Unknown"
+
+
+    echo "${status} ${model}"
+
 
     if [[ -n "$rotation" ]]; then
-        echo "${status} ${model}"
+
         echo "${size} · ${rotation}"
+
     else
-        echo "${status} ${model}"
+
         echo "${size} · NVMe"
+
     fi
 }
 
@@ -556,16 +624,15 @@ get_storage_info() {
     pvesm status 2>/dev/null |
         awk '
             NR > 1 && $1 !~ /^$/ {
+
                 storage=$1
-                type=$2
                 total=$5
                 used=$6
-                avail=$7
 
                 if (total ~ /^[0-9]+$/ && used ~ /^[0-9]+$/) {
 
-                    used_gb=used/1024/1024/1024
-                    total_gb=total/1024/1024/1024
+                    used_gb=used/1024/1024
+                    total_gb=total/1024/1024
 
                     if (total > 0)
                         percent=(used/total)*100
@@ -573,8 +640,13 @@ get_storage_info() {
                         percent=0
 
                     printf "🟢 %s\n", storage
-                    printf "%.1f GB used / %.1f GB · %.2f%%\n",
-                           used_gb, total_gb, percent
+
+                    if (total_gb >= 100)
+                        printf "%.1f GB used / %.1f GB · %.2f%%\n",
+                            used_gb, total_gb, percent
+                    else
+                        printf "%.2f GB used / %.2f GB · %.2f%%\n",
+                            used_gb, total_gb, percent
                 }
             }
         '
@@ -585,14 +657,78 @@ get_storage_info() {
 # Backup information
 # ============================================================
 
+get_backup_storage_path() {
+
+    if [[ ! -f "$STORAGE_CONFIG" ]]; then
+        return
+    fi
+
+
+    awk '
+        $1 == "dir:" && $2 == "backup-hdd" {
+            found=1
+            next
+        }
+
+        found && /^[^ \t]/ {
+            exit
+        }
+
+        found && /^[ \t]+path / {
+            print $2
+            exit
+        }
+    ' "$STORAGE_CONFIG"
+}
+
+
+get_backup_status_from_log() {
+
+    local log_file="$1"
+
+    if [[ ! -f "$log_file" ]]; then
+        echo "🟢"
+        return
+    fi
+
+
+    if grep -qiE \
+        'error|failed|failure|vzdump.*error|backup job failed|command.*failed' \
+        "$log_file"; then
+
+        echo "🔴"
+
+    elif grep -qiE \
+        'finished successfully|backup finished successfully|TASK OK' \
+        "$log_file"; then
+
+        echo "🟢"
+
+    else
+
+        echo "🟠"
+    fi
+}
+
+
 get_backup_info() {
 
-    local backup_dir="/mnt/backup-hdd"
+    local backup_dir
+
+    backup_dir=$(get_backup_storage_path)
+
+
+    if [[ -z "$backup_dir" ]]; then
+        echo "backup-hdd Storage 경로를 찾을 수 없습니다."
+        return
+    fi
+
 
     if [[ ! -d "$backup_dir" ]]; then
         echo "백업 디렉터리를 찾을 수 없습니다."
         return
     fi
+
 
     local files
 
@@ -604,43 +740,49 @@ get_backup_info() {
         sort -nr |
         head -n 5)
 
+
     if [[ -z "$files" ]]; then
         echo "백업 파일이 없습니다."
         return
     fi
 
+
     while IFS='|' read -r timestamp file; do
 
         [[ -z "$file" ]] && continue
 
+
         local filename
+        local date_text
+        local size
+        local status
+        local log_file
+
+
         filename=$(basename "$file")
 
-        local date_text
-        date_text=$(date -d "@${timestamp%.*}" '+%Y-%m-%d %H:%M')
 
-        local size
+        date_text=$(date \
+            -d "@${timestamp%.*}" \
+            '+%Y-%m-%d %H:%M')
+
+
         size=$(du -h "$file" 2>/dev/null |
             awk '{print $1}')
 
-        local status="🟢"
 
-        local log_file="${file%.vma.zst}.log"
+        log_file="${file%.vma.zst}.log"
+
         [[ "$file" == *.tar.zst ]] &&
             log_file="${file%.tar.zst}.log"
 
-        if [[ -f "$log_file" ]]; then
 
-            if grep -qiE \
-                'error|failed|failure|vzdump.*error' \
-                "$log_file"; then
-                status="🔴"
-            fi
+        status=$(get_backup_status_from_log "$log_file")
 
-        fi
 
         echo "${status} ${date_text} · ${size}"
         echo "${filename}"
+
 
     done <<< "$files"
 }
@@ -657,23 +799,44 @@ get_hardware_info() {
     local ram
     local bios
 
-    cpu=$(lscpu 2>/dev/null |
-        awk -F: '/Model name:/ {
-            gsub(/^[ \t]+/, "", $2)
-            print $2
-            exit
-        }')
 
-    board=$(dmidecode -s baseboard-manufacturer 2>/dev/null)
+    cpu=$(lscpu 2>/dev/null |
+        awk -F: '
+            /Model name:/ {
+                gsub(/^[ \t]+/, "", $2)
+                print $2
+                exit
+            }
+        ')
+
+
+    local board_manufacturer
     local board_product
+
+
+    board_manufacturer=$(dmidecode -s baseboard-manufacturer 2>/dev/null)
     board_product=$(dmidecode -s baseboard-product-name 2>/dev/null)
 
-    if [[ -n "$board" && -n "$board_product" ]]; then
-        board="${board} ${board_product}"
+
+    if [[ -n "$board_manufacturer" &&
+          -n "$board_product" ]]; then
+
+        board="${board_manufacturer} ${board_product}"
+
+    elif [[ -n "$board_manufacturer" ]]; then
+
+        board="$board_manufacturer"
+
+    else
+
+        board="$board_product"
+
     fi
+
 
     ram=$(free -h 2>/dev/null |
         awk '/^Mem:/ {print $2}')
+
 
     bios=$(dmidecode -t bios 2>/dev/null |
         awk -F: '
@@ -681,20 +844,24 @@ get_hardware_info() {
                 gsub(/^[ \t]+/, "", $2)
                 version=$2
             }
+
             /Release Date:/ {
                 gsub(/^[ \t]+/, "", $2)
                 date=$2
             }
+
             END {
                 if (version != "")
                     print version " · " date
             }
         ')
 
+
     [[ -z "$cpu" ]] && cpu="-"
     [[ -z "$board" ]] && board="-"
     [[ -z "$ram" ]] && ram="-"
     [[ -z "$bios" ]] && bios="-"
+
 
     echo "CPU: ${cpu}"
     echo "Mainboard: ${board}"
@@ -712,25 +879,32 @@ generate_report() {
     local now
     now=$(date '+%Y-%m-%d %H:%M')
 
+
     local hostname
     hostname=$(hostname)
+
 
     local pve_version
     pve_version=$(get_pve_version)
 
+
     local kernel
     kernel=$(get_kernel_version)
+
 
     local uptime
     uptime=$(get_uptime)
 
+
     local message=""
+
 
     message+="🖥️ Proxmox 서버 리포트"
     message+=$'\n'
     message+="${now}"
     message+=$'\n'
     message+=$'\n'
+
 
     # --------------------------------------------------------
     # Server status
@@ -743,14 +917,20 @@ generate_report() {
     message+="━━━━━━━━━━━━━━━━━━"
     message+=$'\n'
 
+
     message+="🟢 Proxmox 정상"
     message+=$'\n'
+
+
     message+="가동 시간: ${uptime}"
     message+=$'\n'
     message+=$'\n'
 
+
     message+="Proxmox VE: ${pve_version}"
     message+=$'\n'
+
+
     message+="Kernel: ${kernel}"
     message+=$'\n'
     message+=$'\n'
@@ -767,9 +947,12 @@ generate_report() {
     message+="━━━━━━━━━━━━━━━━━━"
     message+=$'\n'
 
+
     local vm_list
+
     vm_list=$(qm list 2>/dev/null |
         awk 'NR > 1 {print $1}')
+
 
     if [[ -z "$vm_list" ]]; then
 
@@ -782,8 +965,11 @@ generate_report() {
 
             [[ -z "$vmid" ]] && continue
 
+
             local vm_info
+
             vm_info=$(get_vm_info "$vmid")
+
 
             message+="${vm_info}"
             message+=$'\n'
@@ -805,9 +991,12 @@ generate_report() {
     message+="━━━━━━━━━━━━━━━━━━"
     message+=$'\n'
 
+
     local lxc_list
+
     lxc_list=$(pct list 2>/dev/null |
         awk 'NR > 1 {print $1}')
+
 
     if [[ -z "$lxc_list" ]]; then
 
@@ -820,8 +1009,11 @@ generate_report() {
 
             [[ -z "$ctid" ]] && continue
 
+
             local lxc_info
+
             lxc_info=$(get_lxc_info "$ctid")
+
 
             message+="${lxc_info}"
             message+=$'\n'
@@ -843,28 +1035,41 @@ generate_report() {
     message+="━━━━━━━━━━━━━━━━━━"
     message+=$'\n'
 
+
     local disks
+
     disks=$(smartctl --scan-open 2>/dev/null || true)
+
 
     while read -r line; do
 
         [[ -z "$line" ]] && continue
 
+
         local device
         local type
 
-        device=$(echo "$line" | awk '{print $1}')
+
+        device=$(echo "$line" |
+            awk '{print $1}')
+
+
         type=$(echo "$line" |
             sed -n 's/.*-d \([^ ]*\).*/\1/p')
 
+
         [[ -z "$type" ]] && type="sat"
 
+
         local disk_info
+
         disk_info=$(get_disk_info "$device" "$type")
+
 
         message+="${disk_info}"
         message+=$'\n'
         message+=$'\n'
+
 
     done <<< "$disks"
 
@@ -880,8 +1085,11 @@ generate_report() {
     message+="━━━━━━━━━━━━━━━━━━"
     message+=$'\n'
 
+
     local storage_info
+
     storage_info=$(get_storage_info)
+
 
     message+="${storage_info}"
     message+=$'\n'
@@ -899,8 +1107,11 @@ generate_report() {
     message+="━━━━━━━━━━━━━━━━━━"
     message+=$'\n'
 
+
     local backup_info
+
     backup_info=$(get_backup_info)
+
 
     message+="${backup_info}"
     message+=$'\n'
@@ -918,8 +1129,11 @@ generate_report() {
     message+="━━━━━━━━━━━━━━━━━━"
     message+=$'\n'
 
+
     local hardware_info
+
     hardware_info=$(get_hardware_info)
+
 
     message+="${hardware_info}"
     message+=$'\n'
@@ -936,18 +1150,27 @@ generate_report() {
 send_test() {
 
     local now
+
     now=$(date '+%Y-%m-%d %H:%M:%S')
 
+
     local hostname
+
     hostname=$(hostname)
 
+
     local pve_version
+
     pve_version=$(get_pve_version)
 
+
     local kernel
+
     kernel=$(get_kernel_version)
 
+
     local message=""
+
 
     message+="🟢 Proxmox Telegram Monitor 테스트"
     message+=$'\n'
@@ -963,9 +1186,12 @@ send_test() {
     message+=$'\n'
     message+="Telegram 연결이 정상적으로 확인되었습니다."
 
+
     log "Sending Telegram test message..."
 
+
     telegram_send "$message"
+
 
     log "Test message sent successfully."
 }
