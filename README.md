@@ -82,86 +82,13 @@ Proxmox VE에는 대부분 기본적으로 포함되어 있습니다.
 
 ---
 
-## 3. Telegram 설정
-
-두 스크립트가 공통으로 사용하는 Telegram Bot 정보를 설정합니다.
-
-설정 파일은 다음 위치에 생성됩니다.
-
-```text
-/etc/pve-telegram-monitor/config
-```
-
-### 3-1. 설정 디렉터리 생성
-
-Proxmox Shell에서 실행합니다.
-
-```bash
-mkdir -p /etc/pve-telegram-monitor
-```
-
-### 3-2. Telegram Bot Token 입력
-
-다음 명령을 실행하면 Bot Token을 입력할 수 있습니다.
-
-```bash
-read -rsp "Telegram Bot Token: " TELEGRAM_BOT_TOKEN
-echo
-```
-
-입력한 Token은 화면에 표시되지 않습니다.
-
-### 3-3. Telegram Chat ID 입력
-
-```bash
-read -rp "Telegram Chat ID: " TELEGRAM_CHAT_ID
-```
-
-### 3-4. 설정 파일 생성
-
-다음 명령을 실행합니다.
-
-```bash
-cat > /etc/pve-telegram-monitor/config <<EOF
-TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
-TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID}"
-EOF
-```
-
-### 3-5. 설정 파일 권한 제한
-
-Bot Token이 포함되어 있으므로 파일 접근 권한을 제한합니다.
-
-```bash
-chmod 600 /etc/pve-telegram-monitor/config
-```
-
-### 3-6. 설정 파일 생성 여부 확인
-
-Token 자체를 출력하지 않고 파일과 권한만 확인합니다.
-
-```bash
-ls -l /etc/pve-telegram-monitor/config
-```
-
-정상적인 경우 다음과 비슷하게 표시됩니다.
-
-```text
--rw------- 1 root root ... /etc/pve-telegram-monitor/config
-```
-
-> **주의:** Telegram Bot Token은 다른 사람에게 공개하지 마십시오.
-
----
-
-## 4. GitHub에서 Event Monitor 다운로드
+## 3. GitHub에서 Event Monitor 다운로드
 
 Proxmox Shell에서 다음 명령을 실행합니다.
 
 ```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-event.sh \
-  -o /usr/local/bin/pve-telegram-event.sh
+wget -O /usr/local/bin/pve-telegram-event.sh \
+  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-event.sh
 
 chmod +x /usr/local/bin/pve-telegram-event.sh
 ```
@@ -180,14 +107,13 @@ chmod +x /usr/local/bin/pve-telegram-event.sh
 
 ---
 
-## 5. GitHub에서 Daily Report 다운로드
+## 4. GitHub에서 Daily Report 다운로드
 
 다음 명령을 실행합니다.
 
 ```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-monitor.sh \
-  -o /usr/local/bin/pve-telegram-monitor.sh
+wget -O /usr/local/bin/pve-telegram-monitor.sh \
+  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-monitor.sh
 
 chmod +x /usr/local/bin/pve-telegram-monitor.sh
 ```
@@ -206,6 +132,62 @@ chmod +x /usr/local/bin/pve-telegram-monitor.sh
 
 ---
 
+## 5. Daily Report 설치
+
+Daily Report는 systemd service와 timer를 이용하여 정기적으로 실행됩니다.
+
+다음 명령으로 설치합니다.
+
+```bash
+/usr/local/bin/pve-telegram-monitor.sh --install
+```
+
+설치 과정에서 텔레그램 봇/채팅방 설정과 실행 시간을 입력합니다.
+설치 과정에서 다음 항목을 입력합니다.
+
+* Telegram Bot Token (입력한 Token은 화면에 표시되지 않습니다.)
+* Telegram Chat ID
+* Daily Report 실행 시간
+
+Bot Token과 Chat ID는 다음 설정 파일에 저장됩니다.
+```
+/etc/pve-telegram-monitor/config
+```
+Bot Token이 포함된 설정 파일은 600 권한으로 저장됩니다.
+
+Daily Report 실행 일정은 설치 과정에서 입력한 시간으로 설정됩니다.
+
+예:
+
+```text
+Enter report time (HH:MM) [09:00]:
+```
+
+기본값을 사용하려면 아무것도 입력하지 않고 Enter를 누릅니다.
+
+```text
+09:00
+```
+
+원하는 시간을 직접 입력할 수도 있습니다.
+
+예:
+
+```text
+07:30
+```
+
+설치가 완료되면 다음 systemd unit이 생성됩니다.
+
+```text
+pve-telegram-report.service
+pve-telegram-report.timer
+```
+
+Timer는 설정한 시간에 Daily Report를 실행합니다.
+
+---
+
 ## 6. Telegram 연결 테스트
 
 Daily Report가 설치되어 있다면 다음 명령으로 Telegram 연결을 테스트할 수 있습니다.
@@ -218,7 +200,71 @@ Telegram으로 테스트 메시지가 도착하면 연결 설정이 완료된 �
 
 ---
 
-## 7. Event Monitor 설치
+## 7. Daily Report Timer 확인
+
+Timer 상태를 확인합니다.
+
+```bash
+systemctl status pve-telegram-report.timer --no-pager
+```
+
+활성화 여부를 확인합니다.
+
+```bash
+systemctl is-enabled pve-telegram-report.timer
+```
+
+정상 결과:
+
+```text
+enabled
+```
+
+다음 실행 시간을 확인합니다.
+
+```bash
+systemctl list-timers --all | grep pve-telegram-report
+```
+
+---
+
+## 8. Daily Report 수동 테스트
+
+예약된 실행 시간을 기다리지 않고 리포트를 즉시 전송할 수 있습니다.
+
+```bash
+/usr/local/bin/pve-telegram-monitor.sh --report
+```
+
+Telegram으로 Proxmox 서버 리포트가 도착하면 정상입니다.
+
+---
+
+## 9. Daily Report 실행 시간 변경
+
+설정된 실행 시간을 변경하려면 Daily Report를 다시 설치합니다.
+
+```bash
+/usr/local/bin/pve-telegram-monitor.sh --install
+```
+
+새로운 실행 시간을 입력하면 기존 timer 설정이 업데이트됩니다.
+
+예:
+
+```text
+Enter report time (HH:MM) [09:00]: 08:30
+```
+
+설치가 완료된 후 다음 명령으로 변경된 시간을 확인할 수 있습니다.
+
+```bash
+systemctl list-timers --all | grep pve-telegram-report
+```
+
+---
+
+## 10. Event Monitor 설치
 
 실시간 VM/LXC 및 호스트 이벤트 감시 서비스를 설치합니다.
 
@@ -298,116 +344,16 @@ pve-telegram-host-stop.service
 
 그 다음 Proxmox 호스트 종료 알림이 전송되도록 systemd 의존성이 구성됩니다.
 
----
-
-## 8. Daily Report 설치
-
-Daily Report는 systemd service와 timer를 이용하여 정기적으로 실행됩니다.
-
-다음 명령으로 설치합니다.
+### Event Monitor Telegram 테스트
 
 ```bash
-/usr/local/bin/pve-telegram-monitor.sh --install
+/usr/local/bin/pve-telegram-event.sh --test
 ```
-
-설치 과정에서 실행 시간을 입력합니다.
-
-예:
-
-```text
-Enter report time (HH:MM) [09:00]:
-```
-
-기본값을 사용하려면 아무것도 입력하지 않고 Enter를 누릅니다.
-
-```text
-09:00
-```
-
-원하는 시간을 직접 입력할 수도 있습니다.
-
-예:
-
-```text
-07:30
-```
-
-설치가 완료되면 다음 systemd unit이 생성됩니다.
-
-```text
-pve-telegram-report.service
-pve-telegram-report.timer
-```
-
-Timer는 설정한 시간에 Daily Report를 실행합니다.
+Telegram으로 이벤트 모니터 테스트 메시지가 도착하면 정상입니다.
 
 ---
 
-## 9. Daily Report Timer 확인
-
-Timer 상태를 확인합니다.
-
-```bash
-systemctl status pve-telegram-report.timer --no-pager
-```
-
-활성화 여부를 확인합니다.
-
-```bash
-systemctl is-enabled pve-telegram-report.timer
-```
-
-정상 결과:
-
-```text
-enabled
-```
-
-다음 실행 시간을 확인합니다.
-
-```bash
-systemctl list-timers --all | grep pve-telegram-report
-```
-
----
-
-## 10. Daily Report 수동 테스트
-
-예약된 실행 시간을 기다리지 않고 리포트를 즉시 전송할 수 있습니다.
-
-```bash
-/usr/local/bin/pve-telegram-monitor.sh --report
-```
-
-Telegram으로 Proxmox 서버 리포트가 도착하면 정상입니다.
-
----
-
-## 11. Daily Report 실행 시간 변경
-
-설정된 실행 시간을 변경하려면 Daily Report를 다시 설치합니다.
-
-```bash
-/usr/local/bin/pve-telegram-monitor.sh --install
-```
-
-새로운 실행 시간을 입력하면 기존 timer 설정이 업데이트됩니다.
-
-예:
-
-```text
-Enter report time (HH:MM) [09:00]: 08:30
-```
-
-설치가 완료된 후 다음 명령으로 변경된 시간을 확인할 수 있습니다.
-
-```bash
-systemctl list-timers --all | grep pve-telegram-report
-```
-
----
-
-## 12. Event Monitor 제거
+## 11. Event Monitor 제거
 
 Event Monitor와 관련된 systemd 서비스를 제거하려면 다음 명령을 실행합니다.
 
@@ -421,7 +367,7 @@ Telegram 설정 파일은 삭제되지 않습니다.
 
 ---
 
-## 13. Daily Report 제거
+## 12. Daily Report 제거
 
 Daily Report service와 timer를 제거하려면 다음 명령을 실행합니다.
 
@@ -436,7 +382,7 @@ pve-telegram-report.service
 pve-telegram-report.timer
 ```
 
-Telegram 설정 파일은 삭제되지 않습니다.
+Telegram 설정 파일도 함께 삭제됩니다.
 
 설정 파일:
 
@@ -446,7 +392,7 @@ Telegram 설정 파일은 삭제되지 않습니다.
 
 ---
 
-## 14. 설치된 서비스 확인
+## 13. 설치된 서비스 확인
 
 다음 명령으로 관련 systemd unit을 확인할 수 있습니다.
 
@@ -466,7 +412,7 @@ pve-telegram-report.timer
 
 ---
 
-## 15. 이벤트 로그 확인
+## 14. 이벤트 로그 확인
 
 ### 실시간 이벤트 모니터 로그
 
@@ -498,9 +444,18 @@ journalctl -u pve-telegram-host-stop.service --no-pager
 journalctl -u pve-telegram-report.service --no-pager
 ```
 
+## SMART 저장장치 상태 확인
+
+Proxmox 호스트에서 `--smart` 옵션을 사용하면 현재 인식된 저장장치의
+SMART 상태를 확인할 수 있습니다.
+
+```bash
+/usr/local/bin/pve-telegram-monitor.sh --smart
+```
+
 ---
 
-## 16. 시스템 재부팅 테스트
+## 15. 시스템 재부팅 테스트
 
 모든 설정이 완료되었다면 실제 재부팅 테스트를 할 수 있습니다.
 
@@ -511,29 +466,27 @@ reboot
 정상적인 경우 Telegram 알림 순서는 다음과 같습니다.
 
 ```text
-🔴 Proxmox VM 종료
-🔴 Proxmox LXC 종료
+🔴 Proxmox VM/LXC 종료
 🔴 Proxmox 호스트 종료
 
 🟢 Proxmox 호스트 시작
-🟢 Proxmox VM 시작
-🟢 Proxmox LXC 시작
+🟢 Proxmox VM/LXC 시작
 ```
 
-VM/LXC의 종료 및 시작 시간은 실제 게스트 상태에 따라 달라질 수 있습니다.
+실제 알림 순서와 시점은 VM/LXC 종료 및 시작 상태에 따라 달라질 수 있습니다.
 
 ---
 
-## 17. 스크립트 업데이트
+## 16. 스크립트 업데이트
 
 GitHub의 최신 버전으로 스크립트를 업데이트하려면 해당 파일을 다시 다운로드합니다.
+앞서 사용했던 최초 스크립트 다운로드 코드와 같은 코드를 입력하여 업데이트 스크립트를 다운로드 합니다.
 
 ### Event Monitor
 
 ```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-event.sh \
-  -o /usr/local/bin/pve-telegram-event.sh
+wget -O /usr/local/bin/pve-telegram-event.sh \
+  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-event.sh
 
 chmod +x /usr/local/bin/pve-telegram-event.sh
 
@@ -545,9 +498,8 @@ chmod +x /usr/local/bin/pve-telegram-event.sh
 ### Daily Report
 
 ```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-monitor.sh \
-  -o /usr/local/bin/pve-telegram-monitor.sh
+wget -O /usr/local/bin/pve-telegram-monitor.sh \
+  https://raw.githubusercontent.com/mrpark77/pve-telegram-monitor/main/pve-telegram-monitor.sh
 
 chmod +x /usr/local/bin/pve-telegram-monitor.sh
 ```
@@ -555,6 +507,7 @@ chmod +x /usr/local/bin/pve-telegram-monitor.sh
 Daily Report의 기존 실행 시간은 systemd timer에 저장되어 있으므로, 스크립트 업데이트만으로 실행 시간이 변경되지는 않습니다.
 
 실행 시간을 변경하려면 다음 명령을 실행합니다.
+--install을 다시 실행하면 Telegram Bot Token과 Chat ID를 다시 입력해야 합니다.
 
 ```bash
 /usr/local/bin/pve-telegram-monitor.sh --install
@@ -562,7 +515,7 @@ Daily Report의 기존 실행 시간은 systemd timer에 저장되어 있으므�
 
 ---
 
-## 18. 주요 명령어 요약
+## 17. 주요 명령어 요약
 
 ### Event Monitor 버전 확인
 
@@ -624,6 +577,12 @@ systemctl status pve-telegram-event.service --no-pager -l
 systemctl status pve-telegram-report.timer --no-pager
 ```
 
+### SMART 저장장치 상태 확인
+
+```bash
+/usr/local/bin/pve-telegram-monitor.sh --smart\
+```
+
 ### 이벤트 로그
 
 ```bash
@@ -633,27 +592,44 @@ journalctl -u pve-telegram-event.service -f
 
 ---
 
-## 19. 현재 구성 요약
+## 18. 현재 구성 요약
 
 ```text
 Proxmox VE
 │
 ├─ pve-telegram-event.sh
 │  │
-│  ├─ VM 시작/종료 감시
-│  ├─ LXC 시작/종료 감시
+│  ├─ VM 시작/종료/재부팅 감시
+│  ├─ LXC 시작/종료/재부팅 감시
 │  ├─ 호스트 시작 알림
-│  └─ 호스트 종료 알림
+│  ├─ 호스트 종료 알림
+│  ├─ 호스트 재부팅 알림
+│  │
+│  └─ 주요 명령
+│     ├─ --install
+│     ├─ --uninstall
+│     ├─ --test
+│     ├─ --version
+│     └─ --help
 │
 ├─ pve-telegram-monitor.sh
 │  │
-│  ├─ 지정된 시간에 Daily Report 실행
+│  ├─ Daily Report
 │  ├─ 호스트 상태
 │  ├─ VM/LXC 정보
 │  ├─ 디스크 SMART
 │  ├─ Proxmox Storage
 │  ├─ 최근 백업 5개
 │  └─ 하드웨어 정보
+│
+│  주요 명령
+│  ├─ --install
+│  ├─ --uninstall
+│  ├─ --report
+│  ├─ --smart
+│  ├─ --test
+│  ├─ --version
+│  └─ --help
 │
 ├─ systemd
 │  │
