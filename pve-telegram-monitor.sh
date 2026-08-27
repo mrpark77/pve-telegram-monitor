@@ -499,20 +499,22 @@ smart_status() {
     output=$(smartctl -a -d "$type" "$device" 2>/dev/null || true)
 
     if [[ -z "$output" ]]; then
+        SMART_PROBLEM="SMART 정보를 읽을 수 없습니다."
         echo "🔴"
         return
     fi
 
-    # --------------------------------------------------------
-    # Immediate critical conditions
-    # --------------------------------------------------------
+    SMART_PROBLEM=""
 
-    local reallocated
-    local pending
-    local offline_uncorrectable
-    local reported_uncorrect
-    local media_errors
-    local critical_warning
+    local severity=0
+
+    local reallocated=0
+    local pending=0
+    local offline_uncorrectable=0
+    local reported_uncorrect=0
+    local crc=0
+    local media_errors=0
+    local critical_warning=""
 
     reallocated=$(echo "$output" |
         awk '$1 == 5 {print $10; exit}')
@@ -526,12 +528,8 @@ smart_status() {
     reported_uncorrect=$(echo "$output" |
         awk '$1 == 187 {print $10; exit}')
 
-    media_errors=$(echo "$output" |
-        awk -F: '/Media and Data Integrity Errors:/ {
-            gsub(/^[ \t]+/, "", $2)
-            print $2
-            exit
-        }')
+    crc=$(echo "$output" |
+        awk '$1 == 199 {print $10; exit}')
 
     critical_warning=$(echo "$output" |
         awk -F: '/Critical Warning:/ {
@@ -540,58 +538,199 @@ smart_status() {
             exit
         }')
 
+    media_errors=$(echo "$output" |
+        awk -F: '/Media and Data Integrity Errors:/ {
+            gsub(/^[ \t]+/, "", $2)
+            print $2
+            exit
+        }')
+
+    # --------------------------------------------------------
+    # 🔴 위험 조건
+    # --------------------------------------------------------
+
     if [[ "$critical_warning" =~ ^0x ]] &&
        [[ "$critical_warning" != "0x00" ]]; then
-        echo "🔴"
-        return
+
+        SMART_PROBLEM+="Critical Warning: ${critical_warning}"$'\n'
+        severity=2
     fi
 
     if [[ "$media_errors" =~ ^[0-9]+$ ]] &&
        (( media_errors > 0 )); then
-        echo "🔴"
-        return
+
+        SMART_PROBLEM+="Media/Data Integrity Errors: ${media_errors}"$'\n'
+        severity=2
     fi
 
     if [[ "$pending" =~ ^[0-9]+$ ]] &&
        (( pending > 0 )); then
-        echo "🔴"
-        return
+
+        SMART_PROBLEM+="Current Pending Sector: ${pending}"$'\n'
+        severity=2
     fi
 
     if [[ "$offline_uncorrectable" =~ ^[0-9]+$ ]] &&
        (( offline_uncorrectable > 0 )); then
-        echo "🔴"
-        return
+
+        SMART_PROBLEM+="Offline Uncorrectable: ${offline_uncorrectable}"$'\n'
+        severity=2
     fi
 
     if [[ "$reported_uncorrect" =~ ^[0-9]+$ ]] &&
        (( reported_uncorrect > 0 )); then
-        echo "🔴"
-        return
+
+        SMART_PROBLEM+="Reported Uncorrectable: ${reported_uncorrect}"$'\n'
+        severity=2
     fi
+
+    # --------------------------------------------------------
+    # 🟠 주의 조건
+    # --------------------------------------------------------
 
     if [[ "$reallocated" =~ ^[0-9]+$ ]] &&
        (( reallocated > 0 )); then
-        echo "🟠"
-        return
+
+        SMART_PROBLEM+="Reallocated Sector Count: ${reallocated}"$'\n'
+
+        if (( severity < 1 )); then
+            severity=1
+        fi
     fi
-
-    # --------------------------------------------------------
-    # CRC errors
-    # --------------------------------------------------------
-
-    local crc
-
-    crc=$(echo "$output" |
-        awk '$1 == 199 {print $10; exit}')
 
     if [[ "$crc" =~ ^[0-9]+$ ]] &&
        (( crc > 0 )); then
-        echo "🟠"
+
+        SMART_PROBLEM+="UDMA CRC Error Count: ${crc}"$'\n'
+
+        if (( severity < 1 )); then
+            severity=1
+        fi
+    fi
+
+    # --------------------------------------------------------
+    # 최종 상태
+    # --------------------------------------------------------
+
+    case "$severity" in
+        2)
+            echo "🔴"
+            ;;
+
+        1)
+            echo "🟠"
+            ;;
+
+        *)
+            SMART_PROBLEM="없음"
+            echo "🟢"
+            ;;
+    esac
+}
+
+# ============================================================
+# SMART report
+# ============================================================
+
+generate_smart_report() {
+
+    echo
+    echo "=================================================="
+    echo " SMART 상태 및 판정 기준"
+    echo "=================================================="
+    echo
+
+    echo "📌 판정 기준"
+    echo
+
+    echo "🟢 정상"
+    echo "  위험/주의 조건이 확인되지 않음"
+    echo
+
+    echo "🟠 주의"
+    echo "  Reallocated Sector Count > 0"
+    echo "  UDMA CRC Error Count > 0"
+    echo
+
+    echo "🔴 위험"
+    echo "  SMART 정보를 읽을 수 없음"
+    echo "  Current Pending Sector > 0"
+    echo "  Offline Uncorrectable > 0"
+    echo "  Reported Uncorrectable > 0"
+    echo "  NVMe Critical Warning != 0x00"
+    echo "  NVMe Media and Data Integrity Errors > 0"
+    echo
+
+    echo "=================================================="
+    echo " 💾 현재 저장장치"
+    echo "=================================================="
+    echo
+
+    local disks
+
+    disks=$(smartctl --scan-open 2>/dev/null || true)
+
+    if [[ -z "$disks" ]]; then
+        echo "감지된 SMART 저장장치가 없습니다."
+        echo
         return
     fi
 
-    echo "🟢"
+    while IFS= read -r line; do
+
+        [[ -z "$line" ]] && continue
+
+        local device
+        local type
+
+        device=$(echo "$line" | awk '{print $1}')
+
+        type=$(echo "$line" |
+            sed -n 's/.*-d \([^ ]*\).*/\1/p')
+
+        [[ -z "$type" ]] && type="sat"
+
+        local status
+        local model
+        local size
+        local rotation
+        local problem
+        
+        status=$(smart_status "$device" "$type")
+        model=$(get_disk_model "$device" "$type")
+        size=$(get_disk_size "$device" "$type")
+        rotation=$(get_disk_rotation "$device" "$type")
+        
+        problem="$SMART_PROBLEM"
+
+        echo "${status} ${device}"
+
+        [[ -n "$model" ]] && \
+            echo "모델: ${model}"
+
+        [[ -n "$size" ]] && \
+            echo "용량: ${size}"
+
+        [[ -n "$rotation" ]] && \
+            echo "회전속도: ${rotation}"
+
+        echo "문제:"
+
+        if [[ "$problem" == "없음" ]]; then
+            echo "  없음"
+        else
+            while IFS= read -r problem_line; do
+                [[ -z "$problem_line" ]] && continue
+                echo "  ${problem_line}"
+            done <<< "$problem"
+        fi
+
+        echo
+
+    done <<< "$disks"
+
+    echo "=================================================="
+    echo
 }
 
 
@@ -1417,6 +1556,10 @@ Usage:
   ${0} --report
       Generate and send the daily Proxmox report.
 
+  ${0} --smart
+      Show SMART status, monitoring rules and
+      detected disk problems.
+
   ${0} --test
       Send a Telegram connection test message.
 
@@ -1470,6 +1613,12 @@ main() {
 
             load_config
             generate_report
+
+            ;;
+
+        --smart)
+
+            generate_smart_report
 
             ;;
 
