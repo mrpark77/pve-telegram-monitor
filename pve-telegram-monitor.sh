@@ -3,13 +3,13 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.4.2
+# Version: 1.4.3
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.4.2"
+VERSION="1.4.3"
 
 CONFIG_DIR="/etc/pve-telegram-monitor"
 CONFIG_FILE="${CONFIG_DIR}/config"
@@ -686,24 +686,21 @@ generate_smart_report() {
         local model
         local size
         local rotation
-        local problem
-        
         local smart_result
         local status
         local problem
-        
+        local model
+        local size
+        local rotation
+
         smart_result=$(smart_status "$device" "$type")
-        
+
         status="${smart_result%%|*}"
         problem="${smart_result#*|}"
 
-
-        
         model=$(get_disk_model "$device" "$type")
         size=$(get_disk_size "$device" "$type")
         rotation=$(get_disk_rotation "$device" "$type")
-        
-        problem="SMART 판정 정보를 가져오지 못했습니다."
 
         echo "${status} ${device}"
 
