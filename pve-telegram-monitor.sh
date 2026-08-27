@@ -3,13 +3,13 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.4.0
+# Version: 1.4.2
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.4.0"
+VERSION="1.4.2"
 
 CONFIG_DIR="/etc/pve-telegram-monitor"
 CONFIG_FILE="${CONFIG_DIR}/config"
@@ -498,15 +498,13 @@ smart_status() {
 
     output=$(smartctl -a -d "$type" "$device" 2>/dev/null || true)
 
+    local severity=0
+    local problem=""
+
     if [[ -z "$output" ]]; then
-        SMART_PROBLEM="SMART 정보를 읽을 수 없습니다."
-        echo "🔴"
+        echo "🔴|SMART 정보를 읽을 수 없습니다."
         return
     fi
-
-    SMART_PROBLEM=""
-
-    local severity=0
 
     local reallocated=0
     local pending=0
@@ -545,53 +543,49 @@ smart_status() {
             exit
         }')
 
-    # --------------------------------------------------------
-    # 🔴 위험 조건
-    # --------------------------------------------------------
+    # 🔴 위험
 
     if [[ "$critical_warning" =~ ^0x ]] &&
        [[ "$critical_warning" != "0x00" ]]; then
 
-        SMART_PROBLEM+="Critical Warning: ${critical_warning}"$'\n'
+        problem+="Critical Warning: ${critical_warning}"$'\n'
         severity=2
     fi
 
     if [[ "$media_errors" =~ ^[0-9]+$ ]] &&
        (( media_errors > 0 )); then
 
-        SMART_PROBLEM+="Media/Data Integrity Errors: ${media_errors}"$'\n'
+        problem+="Media/Data Integrity Errors: ${media_errors}"$'\n'
         severity=2
     fi
 
     if [[ "$pending" =~ ^[0-9]+$ ]] &&
        (( pending > 0 )); then
 
-        SMART_PROBLEM+="Current Pending Sector: ${pending}"$'\n'
+        problem+="Current Pending Sector: ${pending}"$'\n'
         severity=2
     fi
 
     if [[ "$offline_uncorrectable" =~ ^[0-9]+$ ]] &&
        (( offline_uncorrectable > 0 )); then
 
-        SMART_PROBLEM+="Offline Uncorrectable: ${offline_uncorrectable}"$'\n'
+        problem+="Offline Uncorrectable: ${offline_uncorrectable}"$'\n'
         severity=2
     fi
 
     if [[ "$reported_uncorrect" =~ ^[0-9]+$ ]] &&
        (( reported_uncorrect > 0 )); then
 
-        SMART_PROBLEM+="Reported Uncorrectable: ${reported_uncorrect}"$'\n'
+        problem+="Reported Uncorrectable: ${reported_uncorrect}"$'\n'
         severity=2
     fi
 
-    # --------------------------------------------------------
-    # 🟠 주의 조건
-    # --------------------------------------------------------
+    # 🟠 주의
 
     if [[ "$reallocated" =~ ^[0-9]+$ ]] &&
        (( reallocated > 0 )); then
 
-        SMART_PROBLEM+="Reallocated Sector Count: ${reallocated}"$'\n'
+        problem+="Reallocated Sector Count: ${reallocated}"$'\n'
 
         if (( severity < 1 )); then
             severity=1
@@ -601,30 +595,28 @@ smart_status() {
     if [[ "$crc" =~ ^[0-9]+$ ]] &&
        (( crc > 0 )); then
 
-        SMART_PROBLEM+="UDMA CRC Error Count: ${crc}"$'\n'
+        problem+="UDMA CRC Error Count: ${crc}"$'\n'
 
         if (( severity < 1 )); then
             severity=1
         fi
     fi
 
-    # --------------------------------------------------------
-    # 최종 상태
-    # --------------------------------------------------------
-
+    # 결과 반환
     case "$severity" in
+
         2)
-            echo "🔴"
+            printf '🔴|%s' "$problem"
             ;;
 
         1)
-            echo "🟠"
+            printf '🟠|%s' "$problem"
             ;;
 
         *)
-            SMART_PROBLEM="없음"
-            echo "🟢"
+            printf '🟢|없음'
             ;;
+
     esac
 }
 
@@ -696,12 +688,22 @@ generate_smart_report() {
         local rotation
         local problem
         
-        status=$(smart_status "$device" "$type")
+        local smart_result
+        local status
+        local problem
+        
+        smart_result=$(smart_status "$device" "$type")
+        
+        status="${smart_result%%|*}"
+        problem="${smart_result#*|}"
+
+
+        
         model=$(get_disk_model "$device" "$type")
         size=$(get_disk_size "$device" "$type")
         rotation=$(get_disk_rotation "$device" "$type")
         
-        problem="$SMART_PROBLEM"
+        problem="SMART 판정 정보를 가져오지 못했습니다."
 
         echo "${status} ${device}"
 
@@ -810,7 +812,8 @@ get_disk_info() {
     local size
     local rotation
 
-    status=$(smart_status "$device" "$type")
+    status_result=$(smart_status "$device" "$type")
+    status="${status_result%%|*}"
     model=$(get_disk_model "$device" "$type")
     size=$(get_disk_size "$device" "$type")
     rotation=$(get_disk_rotation "$device" "$type")
