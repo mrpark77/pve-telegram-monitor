@@ -1265,6 +1265,110 @@ get_hardware_info() {
 
 
 # ============================================================
+# 24-hour activity analysis
+# ============================================================
+
+ACTIVITY_GRAPH_CHARS=("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█")
+
+format_activity_rate() {
+    local bytes="$1"
+
+    awk -v b="$bytes" 'BEGIN {
+        if (b >= 1024*1024*1024)
+            printf "%.1f GB/s", b/1024/1024/1024
+        else if (b >= 1024*1024)
+            printf "%.1f MB/s", b/1024/1024
+        else if (b >= 1024)
+            printf "%.1f KB/s", b/1024
+        else
+            printf "%.0f B/s", b
+    }'
+}
+
+make_percent_graph() {
+    local values="$1"
+
+    awk -v values="$values" '
+    BEGIN {
+        n = split(values, a, " ")
+        chars = "▁▂▃▄▅▆▇█"
+
+        for (i = 1; i <= n; i++) {
+            value = a[i]
+
+            if (value < 0)
+                value = 0
+            if (value > 100)
+                value = 100
+
+            index = int(value / 100 * 8)
+
+            if (index > 7)
+                index = 7
+
+            printf "%s", substr(chars, index + 1, 1)
+        }
+
+        printf "\n"
+    }'
+}
+
+make_relative_graph() {
+    local values="$1"
+    local max_value="$2"
+
+    awk -v values="$values" -v max="$max_value" '
+    BEGIN {
+        n = split(values, a, " ")
+        chars = "▁▂▃▄▅▆▇█"
+
+        for (i = 1; i <= n; i++) {
+            value = a[i]
+
+            if (max <= 0) {
+                index = 0
+            } else {
+                index = int(value / max * 8)
+            }
+
+            if (index < 0)
+                index = 0
+
+            if (index > 7)
+                index = 7
+
+            printf "%s", substr(chars, index + 1, 1)
+        }
+
+        printf "\n"
+    }'
+}
+
+get_guest_rrd() {
+    local type="$1"
+    local id="$2"
+    local node
+
+    node=$(hostname)
+
+    if [[ "$type" == "VM" ]]; then
+        pvesh get \
+            "/nodes/${node}/qemu/${id}/rrddata" \
+            --timeframe day \
+            --output-format json \
+            2>/dev/null || true
+
+    elif [[ "$type" == "LXC" ]]; then
+        pvesh get \
+            "/nodes/${node}/lxc/${id}/rrddata" \
+            --timeframe day \
+            --output-format json \
+            2>/dev/null || true
+    fi
+}
+
+
+# ============================================================
 # Daily report
 # ============================================================
 
