@@ -1453,7 +1453,7 @@ generate_activity_report() {
     done < <(pct list 2>/dev/null | awk 'NR > 1 {print $1}')
 
 
-    printf '%s' "$message"
+    telegram_send_long "$message"
 }
 
 
@@ -2287,7 +2287,8 @@ main() {
         --test)
 
             load_config
-            send_test
+            generate_report
+            generate_activity_report
 
             ;;
 
