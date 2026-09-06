@@ -1671,6 +1671,139 @@ _append_guest_activity() {
     output+="평균 $(format_activity_rate "$write_avg") · 최대 $(format_activity_rate "$write_max")"$'\n'
 }
 
+    # --------------------------------------------------------
+    # Detailed activity detection
+    # --------------------------------------------------------
+
+    local activity=""
+    local activity_start=""
+    local activity_end=""
+    local activity_reason=""
+    local activity_active=0
+
+    local cpu_threshold
+    local ram_threshold
+    local read_threshold
+    local write_threshold
+
+    cpu_threshold=$(awk -v v="$cpu_avg" 'BEGIN { printf "%.6f", v * 10 }')
+    ram_threshold=$(awk -v v="$ram_avg" 'BEGIN { printf "%.6f", v * 10 }')
+    read_threshold=$(awk -v v="$read_avg" 'BEGIN { printf "%.6f", v * 10 }')
+    write_threshold=$(awk -v v="$write_avg" 'BEGIN { printf "%.6f", v * 10 }')
+
+    local record
+    local record_time
+    local record_cpu
+    local record_ram
+    local record_read
+    local record_write
+
+    while IFS= read -r record; do
+
+        [[ -z "$record" ]] && continue
+
+        record_time=$(jq -r '.time // 0' <<< "$record")
+        record_cpu=$(jq -r '(.cpu // 0) * 100' <<< "$record")
+        record_ram=$(jq -r '
+            if (.maxmem // 0) > 0
+            then ((.mem // 0) / .maxmem * 100)
+            else 0
+            end
+        ' <<< "$record")
+        record_read=$(jq -r '.diskread // 0' <<< "$record")
+        record_write=$(jq -r '.diskwrite // 0' <<< "$record")
+
+        activity_reason=""
+
+        if awk -v v="$record_cpu" -v t="$cpu_threshold" \
+            'BEGIN { exit !(v > t) }'; then
+            activity_reason="CPU 급증"
+        fi
+
+        if awk -v v="$record_ram" -v t="$ram_threshold" \
+            'BEGIN { exit !(v > t) }'; then
+            if [[ -n "$activity_reason" ]]; then
+                activity_reason+=" · RAM 급증"
+            else
+                activity_reason="RAM 급증"
+            fi
+        fi
+
+        if awk -v v="$record_read" -v t="$read_threshold" \
+            'BEGIN { exit !(v > t) }'; then
+            if [[ -n "$activity_reason" ]]; then
+                activity_reason+=" · Disk Read 급증"
+            else
+                activity_reason="Disk Read 급증"
+            fi
+        fi
+
+        if awk -v v="$record_write" -v t="$write_threshold" \
+            'BEGIN { exit !(v > t) }'; then
+            if [[ -n "$activity_reason" ]]; then
+                activity_reason+=" · Disk Write 급증"
+            else
+                activity_reason="Disk Write 급증"
+            fi
+        fi
+
+        if [[ -n "$activity_reason" ]]; then
+
+            if [[ "$activity_active" -eq 0 ]]; then
+                activity_start="$record_time"
+                activity_end="$record_time"
+                activity_active=1
+            else
+                activity_end="$record_time"
+            fi
+
+        else
+
+            if [[ "$activity_active" -eq 1 ]]; then
+
+                local start_text
+                local end_text
+
+                start_text=$(date -d "@$activity_start" '+%H:%M')
+                end_text=$(date -d "@$activity_end" '+%H:%M')
+
+                activity+="
+${start_text}~${end_text}
+${activity_reason}
+"
+
+                activity_active=0
+                activity_reason=""
+            fi
+
+        fi
+
+    done < <(
+        jq -c --argjson start "$start_time" '
+            .[]
+            | select(.time >= $start)
+        ' <<< "$json"
+    )
+
+    if [[ "$activity_active" -eq 1 ]]; then
+
+        local start_text
+        local end_text
+
+        start_text=$(date -d "@$activity_start" '+%H:%M')
+        end_text=$(date -d "@$activity_end" '+%H:%M')
+
+        activity+="
+${start_text}~${end_text}
+${activity_reason}
+"
+    fi
+
+    if [[ -n "$activity" ]]; then
+        output+="
+⚠️ 상세 활동
+$activity"
+    fi
 
 # ============================================================
 # Daily report
