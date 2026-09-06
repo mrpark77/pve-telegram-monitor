@@ -1633,6 +1633,169 @@ _append_guest_activity() {
     read_graph=$(make_relative_graph "$hourly_read" "$read_max")
     write_graph=$(make_relative_graph "$hourly_write" "$write_max")
 
+    # --------------------------------------------------------
+    # Detailed activity detection
+    # --------------------------------------------------------
+
+    local activity_detail=""
+    local activity_active=0
+    local activity_start=""
+    local activity_end=""
+    local activity_minutes=""
+
+    local current_time=""
+    local current_cpu=0
+    local current_ram=0
+    local current_read=0
+    local current_write=0
+    local current_reason=""
+
+    local detail_start=""
+    local detail_end=""
+    local detail_minutes=""
+    local detail_start_text=""
+    local detail_end_text=""
+    local detail_reason=""
+    local minute_time=""
+    local minute_cpu=0
+    local minute_ram=0
+    local minute_read=0
+    local minute_write=0
+    local minute_reason=""
+    local minute_text=""
+    local read_text=""
+    local write_text=""
+
+    while IFS=$'\t' read -r current_time current_cpu current_ram current_read current_write; do
+
+        if awk -v v="$current_cpu" -v avg="$cpu_avg" \
+            'BEGIN { exit !(v > avg * 10) }'; then
+            current_reason="CPU 급증"
+        fi
+
+        if awk -v v="$current_ram" -v avg="$ram_avg" \
+            'BEGIN { exit !(v > avg * 10) }'; then
+            [[ -n "$current_reason" ]] && current_reason+=" · "
+            current_reason+="RAM 급증"
+        fi
+
+        if awk -v v="$current_read" -v avg="$read_avg" \
+            'BEGIN { exit !(v > avg * 10) }'; then
+            [[ -n "$current_reason" ]] && current_reason+=" · "
+            current_reason+="Disk Read 급증"
+        fi
+
+        if awk -v v="$current_write" -v avg="$write_avg" \
+            'BEGIN { exit !(v > avg * 10) }'; then
+            [[ -n "$current_reason" ]] && current_reason+=" · "
+            current_reason+="Disk Write 급증"
+        fi
+
+        if [[ -n "$current_reason" ]]; then
+
+            if [[ "$activity_active" -eq 0 ]]; then
+                activity_active=1
+                activity_start="$current_time"
+                activity_minutes=""
+            fi
+
+            activity_end="$current_time"
+
+            activity_minutes+="${current_time}"$'\t'"${current_cpu}"$'\t'"${current_ram}"$'\t'"${current_read}"$'\t'"${current_write}"$'\t'"${current_reason}"$'\n'
+
+        elif [[ "$activity_active" -eq 1 ]]; then
+
+            if [[ -n "$activity_detail" ]]; then
+                activity_detail+=$'\n'
+            fi
+
+            activity_detail+="${activity_start}"$'\t'"${activity_end}"$'\t'"${activity_minutes}"
+
+            activity_active=0
+            activity_start=""
+            activity_end=""
+            activity_minutes=""
+
+        fi
+
+    done < <(
+        jq -r --argjson start "$start_time" --argjson end "$end_time" '
+            .[]
+            | select(.time >= $start and .time < $end)
+            | [
+                .time,
+                ((.cpu // 0) * 100),
+                (
+                    if (.maxmem // 0) > 0
+                    then ((.mem // 0) / .maxmem * 100)
+                    else 0
+                    end
+                ),
+                (.diskread // 0),
+                (.diskwrite // 0)
+            ]
+            | @tsv
+        ' <<< "$json"
+    )
+
+    if [[ "$activity_active" -eq 1 ]]; then
+        if [[ -n "$activity_detail" ]]; then
+            activity_detail+=$'\n'
+        fi
+
+        activity_detail+="${activity_start}"$'\t'"${activity_end}"$'\t'"${activity_minutes}"
+    fi
+
+    # --------------------------------------------------------
+    # Detailed activity output
+    # --------------------------------------------------------
+
+    if [[ -n "$activity_detail" ]]; then
+
+        output+=$'\n'
+        output+="⚠️ 상세 활동"$'\n'
+        output+=$'\n'
+
+        while IFS=$'\t' read -r detail_start detail_end detail_minutes; do
+
+            detail_start_text=$(date '+%H:%M' -d "@${detail_start}")
+            detail_end_text=$(date '+%H:%M' -d "@${detail_end}")
+
+            if [[ "$detail_start" == "$detail_end" ]]; then
+                output+="${detail_start_text}"$'\n'
+            else
+                output+="${detail_start_text}~${detail_end_text}"$'\n'
+            fi
+
+            # 해당 구간에서 발생한 모든 활동 원인 취합
+            detail_reason=$(
+                printf '%s\n' "$detail_minutes" |
+                cut -f6 |
+                tr '·' '\n' |
+                sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+                sort -u |
+                paste -sd ' · ' -
+            )
+
+            output+="${detail_reason}"$'\n'
+            output+=$'\n'
+
+            while IFS=$'\t' read -r minute_time minute_cpu minute_ram minute_read minute_write minute_reason; do
+
+                minute_text=$(date '+%H:%M' -d "@${minute_time}")
+
+                read_text=$(format_activity_rate "$minute_read")
+                write_text=$(format_activity_rate "$minute_write")
+
+                output+="${minute_text}  CPU $(printf '%4.1f' "$minute_cpu")% · RAM $(printf '%4.1f' "$minute_ram")% · Read ${read_text} · Write ${write_text}"$'\n'
+
+            done <<< "$detail_minutes"
+
+            output+=$'\n'
+
+        done <<< "$activity_detail"
+
+    fi
 
     # --------------------------------------------------------
     # Result
@@ -1896,6 +2059,14 @@ generate_report() {
 
     telegram_send_long "$message"
 }
+
+    # 24-hour activity report
+    local activity_report
+    activity_report=$(generate_activity_report)
+
+    if [[ -n "$activity_report" ]]; then
+        telegram_send_long "$activity_report"
+    fi
 
 
 # ============================================================
