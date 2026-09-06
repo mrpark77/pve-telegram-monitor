@@ -1637,243 +1637,234 @@ _append_guest_activity() {
     # Detailed activity detection
     # --------------------------------------------------------
 
+    local detail_output=""
+    local activity_found=0
+
     local activity_active=0
-    local activity_start=""
-    local activity_end=""
+    local activity_start=0
+    local activity_end=0
 
-    local activity_cpu=0
-    local activity_ram=0
-    local activity_read=0
-    local activity_write=0
-    local activity_reasons=""
+    local activity_cpu_spike=0
+    local activity_ram_spike=0
+    local activity_read_spike=0
+    local activity_write_spike=0
 
-    local current_time=""
     local current_cpu=0
     local current_ram=0
     local current_read=0
     local current_write=0
 
-    local is_cpu_activity=0
-    local is_ram_activity=0
-    local is_read_activity=0
-    local is_write_activity=0
+    local current_cpu_spike=0
+    local current_ram_spike=0
+    local current_read_spike=0
+    local current_write_spike=0
 
-    while IFS=$'\t' read -r current_time current_cpu current_ram current_read current_write; do
+    local detail_rows=""
 
-        is_cpu_activity=0
-        is_ram_activity=0
-        is_read_activity=0
-        is_write_activity=0
+    while IFS= read -r row; do
+        [[ -z "$row" ]] && continue
 
-        if awk -v v="$current_cpu" -v avg="$cpu_avg" \
-            'BEGIN { exit !(v > avg * 10) }'; then
-            is_cpu_activity=1
+        timestamp=$(jq -r '.time' <<< "$row")
+
+        current_cpu=$(jq -r '.cpu // 0' <<< "$row")
+        current_cpu=$(awk -v v="$current_cpu" 'BEGIN {
+            if (v < 0) v = 0
+            printf "%.1f", v * 100
+        }')
+
+        current_ram=$(jq -r '.mem // 0' <<< "$row")
+        current_ram_max=$(jq -r '.maxmem // 0' <<< "$row")
+
+        if awk -v m="$current_ram_max" 'BEGIN { exit !(m > 0) }'; then
+            current_ram=$(awk -v m="$current_ram" -v max="$current_ram_max" 'BEGIN {
+                v = m / max * 100
+                if (v < 0) v = 0
+                if (v > 100) v = 100
+                printf "%.1f", v
+            }')
+        else
+            current_ram="0.0"
         fi
 
-        if awk -v v="$current_ram" -v avg="$ram_avg" \
-            'BEGIN { exit !(v > avg * 10) }'; then
-            is_ram_activity=1
+        current_read=$(jq -r '.diskread // 0' <<< "$row")
+        current_write=$(jq -r '.diskwrite // 0' <<< "$row")
+
+        current_cpu_spike=0
+        current_ram_spike=0
+        current_read_spike=0
+        current_write_spike=0
+
+        # CPU: 평균 대비 10배 이상
+        if awk -v v="$current_cpu" -v avg="$cpu_avg" 'BEGIN {
+            exit !(avg > 0 && v > avg * 10)
+        }'; then
+            current_cpu_spike=1
         fi
 
-        if awk -v v="$current_read" -v avg="$read_avg" \
-            'BEGIN { exit !(v > avg * 10) }'; then
-            is_read_activity=1
+        # RAM: 평균 대비 10배 이상
+        if awk -v v="$current_ram" -v avg="$ram_avg" 'BEGIN {
+            exit !(avg > 0 && v > avg * 10)
+        }'; then
+            current_ram_spike=1
         fi
 
-        if awk -v v="$current_write" -v avg="$write_avg" \
-            'BEGIN { exit !(v > avg * 10) }'; then
-            is_write_activity=1
+        # Disk Read: 평균 대비 10배 이상 + 최소 1 MB/s
+        if awk -v v="$current_read" -v avg="$read_avg" 'BEGIN {
+            exit !(avg > 0 && v > avg * 10 && v >= 1048576)
+        }'; then
+            current_read_spike=1
         fi
 
-        if [[ "$is_cpu_activity" -eq 1 ||
-              "$is_ram_activity" -eq 1 ||
-              "$is_read_activity" -eq 1 ||
-              "$is_write_activity" -eq 1 ]]; then
+        # Disk Write: 평균 대비 10배 이상 + 최소 1 MB/s
+        if awk -v v="$current_write" -v avg="$write_avg" 'BEGIN {
+            exit !(avg > 0 && v > avg * 10 && v >= 1048576)
+        }'; then
+            current_write_spike=1
+        fi
 
-            # 새로운 활동 구간 시작
-            if [[ "$activity_active" -eq 0 ]]; then
-                activity_active=1
-                activity_start="$current_time"
-                activity_reasons=""
-            fi
+        current_activity=0
 
-            activity_end="$current_time"
+        if (( current_cpu_spike == 1 ||
+              current_ram_spike == 1 ||
+              current_read_spike == 1 ||
+              current_write_spike == 1 )); then
+            current_activity=1
+        fi
 
-            # 활동 원인 누적
-            if [[ "$is_cpu_activity" -eq 1 &&
-                  "$activity_reasons" != *"CPU 급증"* ]]; then
-                [[ -n "$activity_reasons" ]] && activity_reasons+=" · "
-                activity_reasons+="CPU 급증"
-            fi
+        # 활동 시작
+        if (( current_activity == 1 && activity_active == 0 )); then
+            activity_active=1
+            activity_start="$timestamp"
+            activity_end="$timestamp"
 
-            if [[ "$is_ram_activity" -eq 1 &&
-                  "$activity_reasons" != *"RAM 급증"* ]]; then
-                [[ -n "$activity_reasons" ]] && activity_reasons+=" · "
-                activity_reasons+="RAM 급증"
-            fi
+            activity_cpu_spike="$current_cpu_spike"
+            activity_ram_spike="$current_ram_spike"
+            activity_read_spike="$current_read_spike"
+            activity_write_spike="$current_write_spike"
 
-            if [[ "$is_read_activity" -eq 1 &&
-                  "$activity_reasons" != *"Disk Read 급증"* ]]; then
-                [[ -n "$activity_reasons" ]] && activity_reasons+=" · "
-                activity_reasons+="Disk Read 급증"
-            fi
+            detail_rows="${timestamp}|${current_cpu}|${current_ram}|${current_read}|${current_write}"$'\n'
 
-            if [[ "$is_write_activity" -eq 1 &&
-                  "$activity_reasons" != *"Disk Write 급증"* ]]; then
-                [[ -n "$activity_reasons" ]] && activity_reasons+=" · "
-                activity_reasons+="Disk Write 급증"
-            fi
+        # 활동 지속
+        elif (( current_activity == 1 && activity_active == 1 )); then
+            activity_end="$timestamp"
 
-            # 현재 분 데이터 저장
-            activity_cpu+="${current_cpu}"$'\t'
-            activity_ram+="${current_ram}"$'\t'
-            activity_read+="${current_read}"$'\t'
-            activity_write+="${current_write}"$'\t'
+            (( current_cpu_spike == 1 )) && activity_cpu_spike=1
+            (( current_ram_spike == 1 )) && activity_ram_spike=1
+            (( current_read_spike == 1 )) && activity_read_spike=1
+            (( current_write_spike == 1 )) && activity_write_spike=1
 
-        elif [[ "$activity_active" -eq 1 ]]; then
+            detail_rows+="${timestamp}|${current_cpu}|${current_ram}|${current_read}|${current_write}"$'\n'
 
-            # ------------------------------------------------
-            # 활동 구간 출력
-            # ------------------------------------------------
+        # 활동 종료
+        elif (( current_activity == 0 && activity_active == 1 )); then
 
-            local start_text
-            local end_text
+            activity_found=1
 
-            start_text=$(date '+%H:%M' -d "@${activity_start}")
-            end_text=$(date '+%H:%M' -d "@${activity_end}")
+            activity_start_display=$(date -d "@${activity_start}" '+%H:%M')
+            activity_end_display=$(date -d "@${activity_end}" '+%H:%M')
 
-            output+=$'\n'
-            output+="⚠️ 상세 활동"$'\n'
-            output+=$'\n'
-
-            if [[ "$activity_start" == "$activity_end" ]]; then
-                output+="${start_text}"$'\n'
+            if [[ "$activity_start_display" == "$activity_end_display" ]]; then
+                detail_output+="${activity_start_display}"$'\n'
             else
-                output+="${start_text}~${end_text}"$'\n'
+                detail_output+="${activity_start_display}~${activity_end_display}"$'\n'
             fi
 
-            output+="${activity_reasons}"$'\n'
-            output+=$'\n'
+            reasons=""
 
-            # 현재 구간의 시작부터 종료까지 RRD를 다시 읽어서
-            # 실제 분 단위 데이터를 출력
-            while IFS=$'\t' read -r minute_time minute_cpu minute_ram minute_read minute_write; do
+            (( activity_cpu_spike == 1 )) &&
+                reasons+="CPU 급증 · "
 
-                minute_text=$(date '+%H:%M' -d "@${minute_time}")
+            (( activity_ram_spike == 1 )) &&
+                reasons+="RAM 급증 · "
 
-                output+="${minute_text}  CPU $(printf '%4.1f' "$minute_cpu")% · RAM $(printf '%4.1f' "$minute_ram")% · Read $(format_activity_rate "$minute_read") · Write $(format_activity_rate "$minute_write")"$'\n'
+            (( activity_read_spike == 1 )) &&
+                reasons+="Disk Read 급증 · "
 
-            done < <(
-                jq -r \
-                    --argjson start "$activity_start" \
-                    --argjson end "$activity_end" '
-                    .[]
-                    | select(.time >= $start and .time <= $end)
-                    | [
-                        .time,
-                        ((.cpu // 0) * 100),
-                        (
-                            if (.maxmem // 0) > 0
-                            then ((.mem // 0) / .maxmem * 100)
-                            else 0
-                            end
-                        ),
-                        (.diskread // 0),
-                        (.diskwrite // 0)
-                    ]
-                    | @tsv
-                ' <<< "$json"
-            )
+            (( activity_write_spike == 1 )) &&
+                reasons+="Disk Write 급증 · "
 
-            output+=$'\n'
+            reasons="${reasons% · }"
 
-            # 활동 구간 초기화
+            detail_output+="${reasons}"$'\n'
+
+            while IFS='|' read -r detail_time detail_cpu detail_ram detail_read detail_write; do
+                [[ -z "$detail_time" ]] && continue
+
+                detail_time_display=$(date -d "@${detail_time}" '+%H:%M')
+
+                detail_output+="${detail_time_display}  CPU $(printf '%4.1f' "$detail_cpu")% · RAM $(printf '%4.1f' "$detail_ram")% · Read $(format_activity_rate "$detail_read") · Write $(format_activity_rate "$detail_write")"$'\n'
+            done <<< "$detail_rows"
+
+            detail_output+=$'\n'
+
+            # 다음 활동 구간을 위해 초기화
             activity_active=0
-            activity_start=""
-            activity_end=""
-            activity_reasons=""
-            activity_cpu=""
-            activity_ram=""
-            activity_read=""
-            activity_write=""
+            activity_start=0
+            activity_end=0
+
+            activity_cpu_spike=0
+            activity_ram_spike=0
+            activity_read_spike=0
+            activity_write_spike=0
+
+            detail_rows=""
 
         fi
 
     done < <(
-        jq -r --argjson start "$start_time" --argjson end "$end_time" '
-            map(select(.time >= $start and .time < $end))
-            | sort_by(.time)
-            | .[]
-            | [
-                .time,
-                ((.cpu // 0) * 100),
-                (
-                    if (.maxmem // 0) > 0
-                    then ((.mem // 0) / .maxmem * 100)
-                    else 0
-                    end
-                ),
-                (.diskread // 0),
-                (.diskwrite // 0)
-            ]
-            | @tsv
-        ' <<< "$json"
+        jq -c --argjson start "$start_time" --argjson end "$end_time" '
+            .[]
+            | select(.time >= $start and .time <= $end)
+            | select(.time != null)
+        ' <<< "$rrd" | sort -n -k2
     )
 
-    # --------------------------------------------------------
-    # 마지막 활동 구간 출력
-    # --------------------------------------------------------
+    # 마지막 활동 구간 처리
+    if (( activity_active == 1 )); then
 
-    if [[ "$activity_active" -eq 1 ]]; then
+        activity_found=1
 
-        local start_text
-        local end_text
+        activity_start_display=$(date -d "@${activity_start}" '+%H:%M')
+        activity_end_display=$(date -d "@${activity_end}" '+%H:%M')
 
-        start_text=$(date '+%H:%M' -d "@${activity_start}")
-        end_text=$(date '+%H:%M' -d "@${activity_end}")
-
-        output+=$'\n'
-        output+="⚠️ 상세 활동"$'\n'
-        output+=$'\n'
-
-        if [[ "$activity_start" == "$activity_end" ]]; then
-            output+="${start_text}"$'\n'
+        if [[ "$activity_start_display" == "$activity_end_display" ]]; then
+            detail_output+="${activity_start_display}"$'\n'
         else
-            output+="${start_text}~${end_text}"$'\n'
+            detail_output+="${activity_start_display}~${activity_end_display}"$'\n'
         fi
 
-        output+="${activity_reasons}"$'\n'
-        output+=$'\n'
+        reasons=""
 
-        while IFS=$'\t' read -r minute_time minute_cpu minute_ram minute_read minute_write; do
+        (( activity_cpu_spike == 1 )) &&
+            reasons+="CPU 급증 · "
 
-            minute_text=$(date '+%H:%M' -d "@${minute_time}")
+        (( activity_ram_spike == 1 )) &&
+            reasons+="RAM 급증 · "
 
-            output+="${minute_text}  CPU $(printf '%4.1f' "$minute_cpu")% · RAM $(printf '%4.1f' "$minute_ram")% · Read $(format_activity_rate "$minute_read") · Write $(format_activity_rate "$minute_write")"$'\n'
+        (( activity_read_spike == 1 )) &&
+            reasons+="Disk Read 급증 · "
 
-        done < <(
-            jq -r \
-                --argjson start "$activity_start" \
-                --argjson end "$activity_end" '
-                .[]
-                | select(.time >= $start and .time <= $end)
-                | [
-                    .time,
-                    ((.cpu // 0) * 100),
-                    (
-                        if (.maxmem // 0) > 0
-                        then ((.mem // 0) / .maxmem * 100)
-                        else 0
-                        end
-                    ),
-                    (.diskread // 0),
-                    (.diskwrite // 0)
-                ]
-                | @tsv
-            ' <<< "$json"
-        )
+        (( activity_write_spike == 1 )) &&
+            reasons+="Disk Write 급증 · "
 
-        output+=$'\n'
+        reasons="${reasons% · }"
+
+        detail_output+="${reasons}"$'\n'
+
+        while IFS='|' read -r detail_time detail_cpu detail_ram detail_read detail_write; do
+            [[ -z "$detail_time" ]] && continue
+
+            detail_time_display=$(date -d "@${detail_time}" '+%H:%M')
+
+            detail_output+="${detail_time_display}  CPU $(printf '%4.1f' "$detail_cpu")% · RAM $(printf '%4.1f' "$detail_ram")% · Read $(format_activity_rate "$detail_read") · Write $(format_activity_rate "$detail_write")"$'\n'
+        done <<< "$detail_rows"
+
+        detail_output+=$'\n'
+    fi
+
+    if (( activity_found == 1 )); then
+        output+="⚠️ 상세 활동"$'\n\n'
+        output+="$detail_output"
     fi
 
     # --------------------------------------------------------
