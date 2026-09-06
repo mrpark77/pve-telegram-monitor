@@ -1417,6 +1417,8 @@ generate_activity_report() {
 
         _append_guest_activity "$rrd" "$start_time" "$end_time" message
         message+=$'\n'
+        message+="===="
+        message+=$'\n'
 
     done < <(qm list 2>/dev/null | awk 'NR > 1 {print $1}')
 
@@ -1444,6 +1446,8 @@ generate_activity_report() {
         message+=$'\n'
 
         _append_guest_activity "$rrd" "$start_time" "$end_time" message
+        message+=$'\n'
+        message+="===="
         message+=$'\n'
 
     done < <(pct list 2>/dev/null | awk 'NR > 1 {print $1}')
@@ -1809,14 +1813,11 @@ _append_guest_activity() {
 
             reason="${reason% · }"
 
-            if [[ "$group_start" == "$group_end" ]]; then
-                detail_output+="${start_display}"$'\n'
-            else
-                detail_output+="${start_display}~${end_display}"$'\n'
+            detail_output+="${start_display}"
+            if [[ "$group_start" != "$group_end" ]]; then
+                detail_output+="~${end_display}"
             fi
-
-            detail_output+="${reason}"$'\n'
-            detail_output+=$'\n'
+            detail_output+=" ${reason}"$'\n'
             detail_output+="${group_minutes}"
             detail_output+=$'\n'
 
@@ -1863,14 +1864,11 @@ _append_guest_activity() {
 
         reason="${reason% · }"
 
-        if [[ "$group_start" == "$group_end" ]]; then
-            detail_output+="${start_display}"$'\n'
-        else
-            detail_output+="${start_display}~${end_display}"$'\n'
+        detail_output+="${start_display}"
+        if [[ "$group_start" != "$group_end" ]]; then
+            detail_output+="~${end_display}"
         fi
-
-        detail_output+="${reason}"$'\n'
-        detail_output+=$'\n'
+        detail_output+=" ${reason}"$'\n'
         detail_output+="${group_minutes}"
         detail_output+=$'\n'
     fi
