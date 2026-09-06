@@ -1558,16 +1558,15 @@ _append_guest_activity() {
     local hour
     local hour_start
     local hour_end
+    local h_cpu
+    local h_ram
+    local h_read
+    local h_write
 
     for hour in $(seq 0 23); do
 
         hour_start=$((start_time + hour * 3600))
         hour_end=$((hour_start + 3600))
-
-        local h_cpu
-        local h_ram
-        local h_read
-        local h_write
 
         h_cpu=$(jq -r \
             --argjson start "$hour_start" \
@@ -1599,7 +1598,7 @@ _append_guest_activity() {
             --argjson end "$hour_end" '
             map(select(.time >= $start and .time < $end))
             | if length == 0 then 0
-              else (map(.diskread // 0) | add / length)
+              else (map(.diskread // 0) | max)
               end
         ' <<< "$json")
 
@@ -1608,7 +1607,7 @@ _append_guest_activity() {
             --argjson end "$hour_end" '
             map(select(.time >= $start and .time < $end))
             | if length == 0 then 0
-              else (map(.diskwrite // 0) | add / length)
+              else (map(.diskwrite // 0) | max)
               end
         ' <<< "$json")
 
@@ -1616,8 +1615,8 @@ _append_guest_activity() {
         hourly_ram+="${h_ram} "
         hourly_read+="${h_read} "
         hourly_write+="${h_write} "
-    done
 
+    done
 
     # --------------------------------------------------------
     # Graphs
@@ -1646,6 +1645,19 @@ _append_guest_activity() {
 
     output+="RAM"$'\n'
     output+="${ram_graph}"$'\n'
+
+    ram_avg=$(awk -v v="$ram_avg" 'BEGIN {
+        if (v < 0) v = 0
+        if (v > 100) v = 100
+        printf "%.1f", v
+    }')
+    
+    ram_max=$(awk -v v="$ram_max" 'BEGIN {
+        if (v < 0) v = 0
+        if (v > 100) v = 100
+        printf "%.1f", v
+    }')
+
     output+="평균 $(printf '%.1f' "$ram_avg")% · 최대 $(printf '%.1f' "$ram_max")%"$'\n'
     output+=$'\n'
 
