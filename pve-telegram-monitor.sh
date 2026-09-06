@@ -1366,6 +1366,299 @@ get_guest_rrd() {
 }
 
 
+# ============================================================
+# Generate 24-hour activity report
+# ============================================================
+
+generate_activity_report() {
+    local now
+    local start_time
+    local end_time
+    local message=""
+
+    now=$(date +%s)
+    start_time=$((now - 86400))
+    end_time="$now"
+
+    local start_display
+    local end_display
+
+    start_display=$(date -d "@${start_time}" '+%m/%d %H:%M')
+    end_display=$(date -d "@${end_time}" '+%m/%d %H:%M')
+
+    message+="📈 최근 24시간 활동"$'\n'
+    message+="(${start_display} → ${end_display})"$'\n'
+    message+=$'\n'
+
+    local node
+    node=$(hostname)
+
+    # --------------------------------------------------------
+    # VM
+    # --------------------------------------------------------
+
+    local vmid
+    while read -r vmid; do
+        [[ -z "$vmid" ]] && continue
+
+        local vm_name
+        vm_name=$(qm config "$vmid" 2>/dev/null |
+            awk -F': ' '/^name:/ {print $2; exit}')
+
+        [[ -z "$vm_name" ]] && vm_name="VM ${vmid}"
+
+        local rrd
+        rrd=$(get_guest_rrd "VM" "$vmid")
+
+        [[ -z "$rrd" ]] && continue
+
+        message+="🖥 VM ${vmid} · ${vm_name}"$'\n'
+        message+=$'\n'
+
+        _append_guest_activity "$rrd" "$start_time" "$end_time" message
+        message+=$'\n'
+
+    done < <(qm list 2>/dev/null | awk 'NR > 1 {print $1}')
+
+
+    # --------------------------------------------------------
+    # LXC
+    # --------------------------------------------------------
+
+    local ctid
+    while read -r ctid; do
+        [[ -z "$ctid" ]] && continue
+
+        local ct_name
+        ct_name=$(pct config "$ctid" 2>/dev/null |
+            awk -F': ' '/^hostname:/ {print $2; exit}')
+
+        [[ -z "$ct_name" ]] && ct_name="LXC ${ctid}"
+
+        local rrd
+        rrd=$(get_guest_rrd "LXC" "$ctid")
+
+        [[ -z "$rrd" ]] && continue
+
+        message+="📦 LXC ${ctid} · ${ct_name}"$'\n'
+        message+=$'\n'
+
+        _append_guest_activity "$rrd" "$start_time" "$end_time" message
+        message+=$'\n'
+
+    done < <(pct list 2>/dev/null | awk 'NR > 1 {print $1}')
+
+
+    printf '%s' "$message"
+}
+
+
+# ============================================================
+# Append one guest's activity data
+# ============================================================
+
+_append_guest_activity() {
+    local rrd="$1"
+    local start_time="$2"
+    local end_time="$3"
+    local -n output="$4"
+
+    local json
+    json="$rrd"
+
+    local cpu_avg
+    local cpu_max
+    local ram_avg
+    local ram_max
+    local read_avg
+    local read_max
+    local write_avg
+    local write_max
+
+    cpu_avg=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(.time >= $start and .time < $end))
+        | if length == 0 then 0
+          else (map(.cpu // 0) | add / length * 100)
+          end
+    ' <<< "$json")
+
+    cpu_max=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(.time >= $start and .time < $end))
+        | if length == 0 then 0
+          else (map(.cpu // 0) | max * 100)
+          end
+    ' <<< "$json")
+
+    ram_avg=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(
+            .time >= $start and
+            .time < $end and
+            (.maxmem // 0) > 0
+        ))
+        | if length == 0 then 0
+          else (
+              map((.mem // 0) / .maxmem * 100)
+              | add / length
+          )
+          end
+    ' <<< "$json")
+
+    ram_max=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(
+            .time >= $start and
+            .time < $end and
+            (.maxmem // 0) > 0
+        ))
+        | if length == 0 then 0
+          else (
+              map((.mem // 0) / .maxmem * 100)
+              | max
+          )
+          end
+    ' <<< "$json")
+
+    read_avg=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(.time >= $start and .time < $end))
+        | if length == 0 then 0
+          else (map(.diskread // 0) | add / length)
+          end
+    ' <<< "$json")
+
+    read_max=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(.time >= $start and .time < $end))
+        | if length == 0 then 0
+          else (map(.diskread // 0) | max)
+          end
+    ' <<< "$json")
+
+    write_avg=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(.time >= $start and .time < $end))
+        | if length == 0 then 0
+          else (map(.diskwrite // 0) | add / length)
+          end
+    ' <<< "$json")
+
+    write_max=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        map(select(.time >= $start and .time < $end))
+        | if length == 0 then 0
+          else (map(.diskwrite // 0) | max)
+          end
+    ' <<< "$json")
+
+
+    # --------------------------------------------------------
+    # 24-hour hourly values
+    # --------------------------------------------------------
+
+    local hourly_cpu=""
+    local hourly_ram=""
+    local hourly_read=""
+    local hourly_write=""
+
+    local hour
+    local hour_start
+    local hour_end
+
+    for hour in $(seq 0 23); do
+
+        hour_start=$((start_time + hour * 3600))
+        hour_end=$((hour_start + 3600))
+
+        local h_cpu
+        local h_ram
+        local h_read
+        local h_write
+
+        h_cpu=$(jq -r \
+            --argjson start "$hour_start" \
+            --argjson end "$hour_end" '
+            map(select(.time >= $start and .time < $end))
+            | if length == 0 then 0
+              else (map(.cpu // 0) | add / length * 100)
+              end
+        ' <<< "$json")
+
+        h_ram=$(jq -r \
+            --argjson start "$hour_start" \
+            --argjson end "$hour_end" '
+            map(select(
+                .time >= $start and
+                .time < $end and
+                (.maxmem // 0) > 0
+            ))
+            | if length == 0 then 0
+              else (
+                  map((.mem // 0) / .maxmem * 100)
+                  | add / length
+              )
+              end
+        ' <<< "$json")
+
+        h_read=$(jq -r \
+            --argjson start "$hour_start" \
+            --argjson end "$hour_end" '
+            map(select(.time >= $start and .time < $end))
+            | if length == 0 then 0
+              else (map(.diskread // 0) | add / length)
+              end
+        ' <<< "$json")
+
+        h_write=$(jq -r \
+            --argjson start "$hour_start" \
+            --argjson end "$hour_end" '
+            map(select(.time >= $start and .time < $end))
+            | if length == 0 then 0
+              else (map(.diskwrite // 0) | add / length)
+              end
+        ' <<< "$json")
+
+        hourly_cpu+="${h_cpu} "
+        hourly_ram+="${h_ram} "
+        hourly_read+="${h_read} "
+        hourly_write+="${h_write} "
+    done
+
+
+    # --------------------------------------------------------
+    # Graphs
+    # --------------------------------------------------------
+
+    local cpu_graph
+    local ram_graph
+    local read_graph
+    local write_graph
+
+    cpu_graph=$(make_percent_graph "$hourly_cpu")
+    ram_graph=$(make_percent_graph "$hourly_ram")
+
+    read_graph=$(make_relative_graph "$hourly_read" "$read_max")
+    write_graph=$(make_relative_graph "$hourly_write" "$write_max")
+
+
+    # --------------------------------------------------------
+    # Result
+    # --------------------------------------------------------
+
+    output+="CPU"$'\n'
+    output+="${cpu_graph}"$'\n'
+    output+="평균 $(printf '%.1f' "$cpu_avg")% · 최대 $(printf '%.1f' "$cpu_max")%"$'\n'
+    output+=$'\n'
+
+    output+="RAM"$'\n'
+    output+="${ram_graph}"$'\n'
+    output+="평균 $(printf '%.1f' "$ram_avg")% · 최대 $(printf '%.1f' "$ram_max")%"$'\n'
+    output+=$'\n'
+
+    output+="Disk Read"$'\n'
+    output+="${read_graph}"$'\n'
+    output+="평균 $(format_activity_rate "$read_avg") · 최대 $(format_activity_rate "$read_max")"$'\n'
+    output+=$'\n'
+
+    output+="Disk Write"$'\n'
+    output+="${write_graph}"$'\n'
+    output+="평균 $(format_activity_rate "$write_avg") · 최대 $(format_activity_rate "$write_max")"$'\n'
+}
+
 
 # ============================================================
 # Daily report
