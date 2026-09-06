@@ -1680,9 +1680,10 @@ _append_guest_activity() {
         local write_spike=0
 
         # CPU 급증
-        if awk -v value="$current_cpu" -v avg="$cpu_avg" '
+        # CPU 사용률이 5% 이상인 경우만 감지
+        if awk -v value="$current_cpu" '
             BEGIN {
-                exit !(avg > 0 && value > avg * 10)
+                exit !(value >= 5)
             }
         '; then
             cpu_spike=1
@@ -1772,12 +1773,13 @@ _append_guest_activity() {
             read_display=$(format_activity_rate "$current_read")
             write_display=$(format_activity_rate "$current_write")
 
-            group_minutes+="$(printf '%s  CPU %4.1f%% · RAM %4.1f%% · Read %s · Write %s\n' \
+            group_minutes+=$(printf '%s  CPU %4.1f%% · RAM %4.1f%% · Read %s · Write %s\n' \
                 "$minute_display" \
                 "$current_cpu" \
                 "$display_ram" \
                 "$read_display" \
-                "$write_display")"
+                "$write_display")
+            group_minutes+=$'\n'
 
         # ----------------------------------------------------
         # Spike 종료
