@@ -1417,7 +1417,8 @@ generate_activity_report() {
 
         _append_guest_activity "$rrd" "$start_time" "$end_time" message
         message+=$'\n'
-        message+="===="
+        message+="============"
+        message+=$'\n'
         message+=$'\n'
 
     done < <(qm list 2>/dev/null | awk 'NR > 1 {print $1}')
@@ -1447,7 +1448,8 @@ generate_activity_report() {
 
         _append_guest_activity "$rrd" "$start_time" "$end_time" message
         message+=$'\n'
-        message+="===="
+        message+="============"
+        message+=$'\n'
         message+=$'\n'
 
     done < <(pct list 2>/dev/null | awk 'NR > 1 {print $1}')
@@ -1918,7 +1920,7 @@ _append_guest_activity() {
         output+="${detail_output}"
     fi
 
-
+    telegram_send_long "$output"
 }
 
 # ============================================================
@@ -2269,6 +2271,7 @@ main() {
 
             load_config
             generate_report
+            generate_activity_report
 
             ;;
 
@@ -2287,8 +2290,7 @@ main() {
         --test)
 
             load_config
-            generate_report
-            generate_activity_report
+            send_test
 
             ;;
 
