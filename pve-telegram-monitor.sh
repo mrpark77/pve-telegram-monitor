@@ -1299,12 +1299,12 @@ make_percent_graph() {
             if (value > 100)
                 value = 100
 
-            index = int(value / 100 * 8)
+            level = int(value / 100 * 8)
 
-            if (index > 7)
-                index = 7
+            if (level > 7)
+                level = 7
 
-            printf "%s", substr(chars, index + 1, 1)
+            printf "%s", substr(chars, level + 1, 1)
         }
 
         printf "\n"
@@ -1324,18 +1324,18 @@ make_relative_graph() {
             value = a[i]
 
             if (max <= 0) {
-                index = 0
+                level = 0
             } else {
-                index = int(value / max * 8)
+                level = int(value / max * 8)
             }
 
-            if (index < 0)
-                index = 0
+            if (level < 0)
+                level = 0
 
-            if (index > 7)
-                index = 7
+            if (level > 7)
+                level = 7
 
-            printf "%s", substr(chars, index + 1, 1)
+            printf "%s", substr(chars, level + 1, 1)
         }
 
         printf "\n"
