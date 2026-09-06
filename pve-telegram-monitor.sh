@@ -3,13 +3,13 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.4.3
+# Version: 1.5.0
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.4.3"
+VERSION="1.5.0"
 
 CONFIG_DIR="/etc/pve-telegram-monitor"
 CONFIG_FILE="${CONFIG_DIR}/config"
