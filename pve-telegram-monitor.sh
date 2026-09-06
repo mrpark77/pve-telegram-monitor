@@ -1637,173 +1637,159 @@ _append_guest_activity() {
     # Detailed activity detection
     # --------------------------------------------------------
 
-        local activity_rows
-        local detail_output=""
-        local detail_header_printed=0
+    local detail_output=""
+    local detail_header_printed=0
 
-        local group_active=0
-        local group_start=""
-        local group_end=""
-        local activity_minutes=""
+    local group_active=0
+    local group_start=""
+    local group_end=""
+    local group_minutes=""
 
-        local group_cpu_spike=0
-        local group_ram_spike=0
-        local group_read_spike=0
-        local group_write_spike=0
+    local group_cpu_spike=0
+    local group_ram_spike=0
+    local group_read_spike=0
+    local group_write_spike=0
 
-        activity_rows=$(jq -r '
-            .[] |
-            [
-                (.time // 0),
-                ((.cpu // 0) * 100),
-                (if (.maxmem // 0) > 0 then ((.mem // 0) / .maxmem * 100) else 0 end),
-                (.diskread // 0),
-                (.diskwrite // 0)
-            ] |
-            @tsv
-        ' <<< "$json")
+    local activity_rows
 
-        while IFS=$'\t' read -r timestamp cpu ram diskread diskwrite; do
-            [[ -z "$timestamp" ]] && continue
+    activity_rows=$(jq -r --argjson start "$start_time" --argjson end "$end_time" '
+        .[]
+        | select(.time >= $start and .time < $end)
+        | [
+            .time,
+            ((.cpu // 0) * 100),
+            (
+                if (.maxmem // 0) > 0
+                then ((.mem // 0) / .maxmem * 100)
+                else 0
+                end
+            ),
+            (.diskread // 0),
+            (.diskwrite // 0)
+        ]
+        | @tsv
+    ' <<< "$json")
 
-            # Current minute spike flags
-            local cpu_spike=0
-            local ram_spike=0
-            local read_spike=0
-            local write_spike=0
+    while IFS=$'\t' read -r current_time current_cpu current_ram current_read current_write; do
 
-            # CPU / RAM spike
-            if awk -v value="$cpu" -v avg="$cpu_avg" 'BEGIN { exit !(avg > 0 && value > avg * 10) }'; then
-                cpu_spike=1
-            fi
+        [[ -z "$current_time" ]] && continue
 
-            if awk -v value="$ram" -v avg="$ram_avg" 'BEGIN { exit !(avg > 0 && value > avg * 10) }'; then
-                ram_spike=1
-            fi
+        local cpu_spike=0
+        local ram_spike=0
+        local read_spike=0
+        local write_spike=0
 
-            # Disk Read / Write spike
-            # 평균 대비 10배 이상이면서 실제 전송량이 1 MB/s 이상인 경우만 감지
-            if awk -v value="$diskread" -v avg="$read_avg" '
-                BEGIN {
-                    exit !(avg > 0 && value > avg * 10 && value >= 1048576)
-                }
-            '; then
-                read_spike=1
-            fi
+        # CPU 급증
+        if awk -v value="$current_cpu" -v avg="$cpu_avg" '
+            BEGIN {
+                exit !(avg > 0 && value > avg * 10)
+            }
+        '; then
+            cpu_spike=1
+        fi
 
-            if awk -v value="$diskwrite" -v avg="$write_avg" '
-                BEGIN {
-                    exit !(avg > 0 && value > avg * 10 && value >= 1048576)
-                }
-            '; then
-                write_spike=1
-            fi
+        # RAM 급증
+        if awk -v value="$current_ram" -v avg="$ram_avg" '
+            BEGIN {
+                exit !(avg > 0 && value > avg * 10)
+            }
+        '; then
+            ram_spike=1
+        fi
 
-            local any_spike=0
+        # Disk Read 급증
+        # 평균 대비 10배 이상 + 실제 1 MB/s 이상
+        if awk -v value="$current_read" -v avg="$read_avg" '
+            BEGIN {
+                exit !(avg > 0 &&
+                       value > avg * 10 &&
+                       value >= 1048576)
+            }
+        '; then
+            read_spike=1
+        fi
 
-            if (( cpu_spike || ram_spike || read_spike || write_spike )); then
-                any_spike=1
-            fi
+        # Disk Write 급증
+        # 평균 대비 10배 이상 + 실제 1 MB/s 이상
+        if awk -v value="$current_write" -v avg="$write_avg" '
+            BEGIN {
+                exit !(avg > 0 &&
+                       value > avg * 10 &&
+                       value >= 1048576)
+            }
+        '; then
+            write_spike=1
+        fi
 
-            # --------------------------------------------------
-            # Spike 시작
-            # --------------------------------------------------
-            if (( any_spike )); then
+        local any_spike=0
 
-                if (( group_active == 0 )); then
-                    group_active=1
-                    group_start="$timestamp"
-                    group_end="$timestamp"
-                    activity_minutes=""
+        if (( cpu_spike || ram_spike || read_spike || write_spike )); then
+            any_spike=1
+        fi
 
-                    group_cpu_spike=0
-                    group_ram_spike=0
-                    group_read_spike=0
-                    group_write_spike=0
-                else
-                    group_end="$timestamp"
-                fi
+        # ----------------------------------------------------
+        # Spike 발생
+        # ----------------------------------------------------
+        if (( any_spike )); then
 
-                # Group reason
-                (( cpu_spike )) && group_cpu_spike=1
-                (( ram_spike )) && group_ram_spike=1
-                (( read_spike )) && group_read_spike=1
-                (( write_spike )) && group_write_spike=1
-
-                # RAM 표시값 0~100% 제한
-                local display_ram="$ram"
-
-                if awk -v value="$display_ram" 'BEGIN { exit !(value < 0) }'; then
-                    display_ram=0
-                elif awk -v value="$display_ram" 'BEGIN { exit !(value > 100) }'; then
-                    display_ram=100
-                fi
-
-                local minute_time
-                minute_time=$(date -d "@${timestamp}" '+%H:%M')
-
-                local read_rate
-                local write_rate
-
-                read_rate=$(format_activity_rate "$diskread")
-                write_rate=$(format_activity_rate "$diskwrite")
-
-                activity_minutes+="$(printf '%s  CPU %4.1f%% · RAM %4.1f%% · Read %s · Write %s\n' \
-                    "$minute_time" \
-                    "$cpu" \
-                    "$display_ram" \
-                    "$read_rate" \
-                    "$write_rate")"
-
-            # --------------------------------------------------
-            # Spike 종료
-            # --------------------------------------------------
-            elif (( group_active == 1 )); then
-
-                if (( detail_header_printed == 0 )); then
-                    detail_output+=$'\n⚠️ 상세 활동\n\n'
-                    detail_header_printed=1
-                fi
-
-                local start_display
-                local end_display
-                local reason=""
-
-                start_display=$(date -d "@${group_start}" '+%H:%M')
-                end_display=$(date -d "@${group_end}" '+%H:%M')
-
-                (( group_cpu_spike )) && reason+="CPU 급증 · "
-                (( group_ram_spike )) && reason+="RAM 급증 · "
-                (( group_read_spike )) && reason+="Disk Read 급증 · "
-                (( group_write_spike )) && reason+="Disk Write 급증 · "
-
-                reason="${reason% · }"
-
-                detail_output+="${start_display}~${end_display}"$'\n'
-                detail_output+="${reason}"$'\n\n'
-                detail_output+="${activity_minutes}"$'\n'
-
-                # Group reset
-                group_active=0
-                group_start=""
-                group_end=""
-                activity_minutes=""
+            # 새로운 그룹 시작
+            if (( group_active == 0 )); then
+                group_active=1
+                group_start="$current_time"
+                group_end="$current_time"
+                group_minutes=""
 
                 group_cpu_spike=0
                 group_ram_spike=0
                 group_read_spike=0
                 group_write_spike=0
+            else
+                group_end="$current_time"
             fi
 
-        done <<< "$activity_rows"
+            # 그룹 내 발생 원인 기록
+            (( cpu_spike )) && group_cpu_spike=1
+            (( ram_spike )) && group_ram_spike=1
+            (( read_spike )) && group_read_spike=1
+            (( write_spike )) && group_write_spike=1
 
-        # --------------------------------------------------
-        # 마지막 Spike 그룹 처리
-        # --------------------------------------------------
-        if (( group_active == 1 )); then
+            # RAM 표시값 0~100%
+            local display_ram="$current_ram"
+
+            display_ram=$(awk -v value="$display_ram" '
+                BEGIN {
+                    if (value < 0) value = 0
+                    if (value > 100) value = 100
+                    printf "%.1f", value
+                }
+            ')
+
+            local minute_display
+            local read_display
+            local write_display
+
+            minute_display=$(date -d "@${current_time}" '+%H:%M')
+            read_display=$(format_activity_rate "$current_read")
+            write_display=$(format_activity_rate "$current_write")
+
+            group_minutes+="$(printf '%s  CPU %4.1f%% · RAM %4.1f%% · Read %s · Write %s\n' \
+                "$minute_display" \
+                "$current_cpu" \
+                "$display_ram" \
+                "$read_display" \
+                "$write_display")"
+
+        # ----------------------------------------------------
+        # Spike 종료
+        # ----------------------------------------------------
+        elif (( group_active == 1 )); then
 
             if (( detail_header_printed == 0 )); then
-                detail_output+=$'\n⚠️ 상세 활동\n\n'
+                detail_output+=$'\n'
+                detail_output+="⚠️ 상세 활동"
+                detail_output+=$'\n'
+                detail_output+=$'\n'
+
                 detail_header_printed=1
             fi
 
@@ -1821,12 +1807,71 @@ _append_guest_activity() {
 
             reason="${reason% · }"
 
-            detail_output+="${start_display}~${end_display}"$'\n'
-            detail_output+="${reason}"$'\n\n'
-            detail_output+="${activity_minutes}"$'\n'
+            if [[ "$group_start" == "$group_end" ]]; then
+                detail_output+="${start_display}"$'\n'
+            else
+                detail_output+="${start_display}~${end_display}"$'\n'
+            fi
+
+            detail_output+="${reason}"$'\n'
+            detail_output+=$'\n'
+            detail_output+="${group_minutes}"
+            detail_output+=$'\n'
+
+            # 그룹 초기화
+            group_active=0
+            group_start=""
+            group_end=""
+            group_minutes=""
+
+            group_cpu_spike=0
+            group_ram_spike=0
+            group_read_spike=0
+            group_write_spike=0
         fi
 
-        message+="$detail_output"
+    done <<< "$activity_rows"
+
+    # --------------------------------------------------------
+    # 마지막 Spike 그룹 처리
+    # --------------------------------------------------------
+
+    if (( group_active == 1 )); then
+
+        if (( detail_header_printed == 0 )); then
+            detail_output+=$'\n'
+            detail_output+="⚠️ 상세 활동"
+            detail_output+=$'\n'
+            detail_output+=$'\n'
+
+            detail_header_printed=1
+        fi
+
+        local start_display
+        local end_display
+        local reason=""
+
+        start_display=$(date -d "@${group_start}" '+%H:%M')
+        end_display=$(date -d "@${group_end}" '+%H:%M')
+
+        (( group_cpu_spike )) && reason+="CPU 급증 · "
+        (( group_ram_spike )) && reason+="RAM 급증 · "
+        (( group_read_spike )) && reason+="Disk Read 급증 · "
+        (( group_write_spike )) && reason+="Disk Write 급증 · "
+
+        reason="${reason% · }"
+
+        if [[ "$group_start" == "$group_end" ]]; then
+            detail_output+="${start_display}"$'\n'
+        else
+            detail_output+="${start_display}~${end_display}"$'\n'
+        fi
+
+        detail_output+="${reason}"$'\n'
+        detail_output+=$'\n'
+        detail_output+="${group_minutes}"
+        detail_output+=$'\n'
+    fi
 
     # --------------------------------------------------------
     # Result
@@ -1845,7 +1890,7 @@ _append_guest_activity() {
         if (v > 100) v = 100
         printf "%.1f", v
     }')
-    
+
     ram_max=$(awk -v v="$ram_max" 'BEGIN {
         if (v < 0) v = 0
         if (v > 100) v = 100
@@ -1863,6 +1908,17 @@ _append_guest_activity() {
     output+="Disk Write"$'\n'
     output+="${write_graph}"$'\n'
     output+="평균 $(format_activity_rate "$write_avg") · 최대 $(format_activity_rate "$write_max")"$'\n'
+
+    # --------------------------------------------------------
+    # Detailed activity
+    # --------------------------------------------------------
+
+    if [[ -n "$detail_output" ]]; then
+        output+=$'\n'
+        output+="${detail_output}"
+    fi
+
+
 }
 
 # ============================================================
