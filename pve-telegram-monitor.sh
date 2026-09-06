@@ -1268,8 +1268,6 @@ get_hardware_info() {
 # 24-hour activity analysis
 # ============================================================
 
-ACTIVITY_GRAPH_CHARS=("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█")
-
 format_activity_rate() {
     local bytes="$1"
 
@@ -1366,6 +1364,7 @@ get_guest_rrd() {
             2>/dev/null || true
     fi
 }
+
 
 
 # ============================================================
