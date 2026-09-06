@@ -2012,6 +2012,12 @@ main() {
 
             ;;
 
+        --activity-test)
+
+            generate_activity_report
+
+            ;;
+
         --smart)
 
             generate_smart_report
