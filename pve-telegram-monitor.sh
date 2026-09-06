@@ -2058,14 +2058,6 @@ generate_report() {
 
 
     telegram_send_long "$message"
-
-    # 24-hour activity report
-    local activity_report
-    activity_report=$(generate_activity_report)
-
-    if [[ -n "$activity_report" ]]; then
-        telegram_send_long "$activity_report"
-    fi
 }
 
 # ============================================================
