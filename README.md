@@ -101,10 +101,10 @@ Daily Report는 Proxmox 서버의 전체적인 상태를 정기적으로 Telegra
 
 포함되는 주요 정보:
 
-* 🖥️ Proxmox 호스트 상태
-* Proxmox VE 버전
-* Kernel 버전
-* 호스트 가동 시간
+* Proxmox 호스트 상태
+  * Proxmox VE 버전
+  * Kernel 버전
+  * 호스트 가동 시간
 * VM 정보
 
   * VM 이름
@@ -124,11 +124,13 @@ Daily Report는 Proxmox 서버의 전체적인 상태를 정기적으로 Telegra
 * 💾 물리 디스크 SMART 상태
 * 📦 Proxmox Storage 사용량
 * 💿 최근 백업 5개
-* 백업 성공/실패 여부
-* CPU 정보
-* 메인보드 정보
-* 물리 RAM 정보
-* BIOS 정보
+  * 백업 성공/실패 여부
+* 시스템 SPEC 요약
+
+  * CPU 정보
+  * 메인보드 정보
+  * 물리 RAM 정보
+  * BIOS 정보
 
 Daily Report는 설치 과정에서 설정한 시간에 systemd timer로 자동 실행됩니다.
 
@@ -146,31 +148,21 @@ Activity Report는 **최근 24시간 동안의 VM/LXC 사용량을 분석하여 
 📈 LXC 101 · docker (09/06 08:30 ~ 09/07 08:30)
 -----------------------
 📊 24시간 요약
-
-CPU
-평균: 4.2%
-최대: 87.1%
-
-RAM
-평균: 42.8%
-최대: 51.3%
-
-Read
-평균: 1.8 MB/s
-최대: 35.4 MB/s
-
-Write
-평균: 0.7 MB/s
-최대: 12.8 MB/s
+CPU (평균 1.0% · 최대 5.0%)
+▁▁▁▁▁▁▁▁▁▁▁▁
+RAM (평균 76.4% · 최대 98.4%)
+▆▆▆▆▆▆▆▆▆▇██
+Read (평균 33.3 KB/s · 최대 32.3 MB/s)
+▁▁▁▁▁▁▁▁▁▁▁▁
+Write (평균 7.1 KB/s · 최대 398.7 KB/s)
+▁▁▁▁▁▁▁▁▁▁▁▁
 
 -----------------------
 ⚠️ 특이사항
 
-🕐 15:08~15:47 CPU, Read 급증
-CPU 평균: 42.1%
-CPU 최대: 87.1%
-Read 평균: 18.2 MB/s
-Read 최대: 35.4 MB/s
+🕐 11:44~11:45 Read, Write 급증
+Read 평균 2.9 MB/s · 최대 2.9 MB/s
+Write 평균 1.5 MB/s · 최대 1.5 MB/s
 ```
 
 특이사항이 없는 경우:
