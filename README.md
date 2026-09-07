@@ -300,6 +300,9 @@ TELEGRAM_CHAT_ID
 
 현재 등록된 Telegram 관련 Timer를 확인합니다.
 
+<details>
+<summary>설치된 Timer 및 활성화 여부 확인</summary>
+
 ```bash
 systemctl list-timers --all | grep -Ei 'pve-telegram'
 ```
@@ -335,10 +338,16 @@ systemctl is-enabled pve-telegram-activity.timer
 ```text
 enabled
 ```
+</details>
 
 ---
 
 # 🧪 수동 테스트
+
+텔레그램 메신저 연동, 리포트 즉시 전송 등을 수행할 수 있습니다. 
+
+<details>
+<summary>텔레그램 연동 및 리포트 테스트</summary>
 
 ## Telegram 연결 테스트
 
@@ -363,6 +372,7 @@ enabled
 ```bash
 /usr/local/bin/pve-telegram-monitor.sh --activity-test
 ```
+</details>
 
 ---
 
