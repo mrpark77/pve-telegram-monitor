@@ -3,19 +3,22 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.6.3
+# Version: 1.6.4
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.6.3"
+VERSION="1.6.4"
 
 CONFIG_DIR="/etc/pve-telegram-monitor"
 CONFIG_FILE="${CONFIG_DIR}/config"
 
 REPORT_SERVICE="/etc/systemd/system/pve-telegram-report.service"
 REPORT_TIMER="/etc/systemd/system/pve-telegram-report.timer"
+
+ACTIVITY_SERVICE="/etc/systemd/system/pve-telegram-activity.service"
+ACTIVITY_TIMER="/etc/systemd/system/pve-telegram-activity.timer"
 
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -91,13 +94,23 @@ install_monitor() {
     echo "매일 실행할 리포트 시간을 입력하세요."
     echo "예: 09:00"
     read -r -p "실행 시간 [09:00]: " REPORT_TIME
-
+    
     [[ -z "$REPORT_TIME" ]] && REPORT_TIME="09:00"
-
     if [[ ! "$REPORT_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
         die "실행 시간 형식이 올바르지 않습니다. 예: 09:00"
     fi
-
+    
+    echo
+    echo "매일 실행할 활동 리포트 시간을 입력하세요."
+    echo "최근 24시간 VM/LXC 사용량 이력을 전송합니다."
+    echo "예: 21:00"
+    read -r -p "활동 리포트 시간 [09:00]: " ACTIVITY_TIME
+    
+    [[ -z "$ACTIVITY_TIME" ]] && ACTIVITY_TIME="09:00"
+    if [[ ! "$ACTIVITY_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        die "활동 리포트 시간 형식이 올바르지 않습니다. 예: 09:00"
+    fi
+    
     echo
     echo "설정을 저장합니다..."
 
@@ -121,6 +134,17 @@ Type=oneshot
 ExecStart=/usr/local/bin/pve-telegram-monitor.sh --report
 EOF
 
+cat > "$ACTIVITY_SERVICE" <<EOF
+[Unit]
+Description=Proxmox Telegram Activity Report
+After=network-online.target pve-guests.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pve-telegram-monitor.sh --activity
+EOF
+
     cat > "$REPORT_TIMER" <<EOF
 [Unit]
 Description=Run Proxmox Telegram Daily Report at ${REPORT_TIME}
@@ -134,18 +158,34 @@ Unit=pve-telegram-report.service
 WantedBy=timers.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable --now pve-telegram-report.timer
+cat > "$ACTIVITY_TIMER" <<EOF
+[Unit]
+Description=Run Proxmox Telegram Activity Report at ${ACTIVITY_TIME}
+
+[Timer]
+OnCalendar=*-*-* ${ACTIVITY_TIME}:00
+Persistent=true
+Unit=pve-telegram-activity.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now pve-telegram-report.timer
+systemctl enable --now pve-telegram-activity.timer
 
     echo
     echo "=============================================="
     echo " 설치가 완료되었습니다."
     echo "=============================================="
     echo
-    echo "Version       : ${VERSION}"
-    echo "Report time   : ${REPORT_TIME}"
-    echo "Config file   : ${CONFIG_FILE}"
-    echo "Timer         : pve-telegram-report.timer"
+    echo "Version        : ${VERSION}"
+    echo "Report time    : ${REPORT_TIME}"
+    echo "Activity time  : ${ACTIVITY_TIME}"
+    echo "Config file    : ${CONFIG_FILE}"
+    echo "Report Timer   : pve-telegram-report.timer"
+    echo "Activity Timer : pve-telegram-activity.timer"
     echo
     echo "Telegram 연결 테스트:"
     echo
@@ -169,11 +209,15 @@ uninstall_monitor() {
     echo
 
     systemctl disable --now pve-telegram-report.timer 2>/dev/null || true
+    systemctl disable --now pve-telegram-activity.timer 2>/dev/null || true
+    
     systemctl stop pve-telegram-report.service 2>/dev/null || true
-
+    systemctl stop pve-telegram-activity.service 2>/dev/null || true
+    
     rm -f "$REPORT_TIMER"
     rm -f "$REPORT_SERVICE"
-
+    rm -f "$ACTIVITY_TIMER"
+    rm -f "$ACTIVITY_SERVICE"
     rm -rf "$CONFIG_DIR"
 
     systemctl daemon-reload
@@ -2310,7 +2354,7 @@ Usage:
       Install Proxmox Telegram Monitor.
 
   ${0} --uninstall
-      Uninstall the daily report timer and configuration.
+      Uninstall report/activity timers and configuration.
 
   ${0} --report
       Generate and send the daily Proxmox report.
