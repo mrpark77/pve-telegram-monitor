@@ -3,13 +3,13 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.6.4
+# Version: 1.6.5
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.6.4"
+VERSION="1.6.5"
 
 CONFIG_DIR="/etc/pve-telegram-monitor"
 CONFIG_FILE="${CONFIG_DIR}/config"
@@ -1989,7 +1989,11 @@ build_guest_activity_report() {
 generate_activity_reports() {
 
     local mode="${1:-send}"
-
+    
+    if [[ "$mode" == "send" ]]; then
+        log "Sending Activity Report..."
+    fi
+    
     local now
     local start_time
     local end_time
@@ -2067,6 +2071,10 @@ generate_activity_reports() {
         fi
 
     done < <(pct list 2>/dev/null | awk 'NR > 1 {print $1}')
+
+    if [[ "$mode" == "send" ]]; then
+        log "Activity Report sent successfully."
+    fi
 }
 
 
@@ -2076,6 +2084,8 @@ generate_activity_reports() {
 
 generate_report() {
 
+    log "Sending Daily Report..."
+    
     local now
     now=$(date '+%Y-%m-%d %H:%M')
 
@@ -2294,6 +2304,8 @@ generate_report() {
 
 
     telegram_send_long "$message"
+
+    log "Daily Report sent successfully."
 }
 
 # ============================================================
