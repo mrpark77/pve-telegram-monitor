@@ -1388,26 +1388,235 @@ build_guest_activity_report() {
     start_display=$(date -d "@${start_time}" '+%m/%d %H:%M')
     end_display=$(date -d "@${end_time}" '+%m/%d %H:%M')
 
-    local result
 
-    result=$(jq -r '
+    # ------------------------------------------------------------
+    # 정확한 24시간 범위만 추출
+    # ------------------------------------------------------------
+
+    local filtered_rrd
+
+    filtered_rrd=$(jq -c \
+        --argjson start "$start_time" \
+        --argjson end "$end_time" '
+        [
+            .[]
+            | select(
+                (.time // 0) >= $start and
+                (.time // 0) < $end and
+                (.cpu != null) and
+                (.maxcpu != null) and
+                (.mem != null) and
+                (.maxmem != null) and
+                (.diskread != null) and
+                (.diskwrite != null)
+            )
+        ]
+    ' <<< "${rrd:-[]}")
+
+
+    # ------------------------------------------------------------
+    # 24시간 전체 평균 / 최대값
+    # ------------------------------------------------------------
+
+    local summary
+
+    summary=$(jq -c \
+        --argjson start "$start_time" \
+        --argjson end "$end_time" '
+        def cpu:
+            if (.maxcpu // 0) > 0
+            then ((.cpu // 0) / .maxcpu * 100)
+            else 0
+            end;
+
+        def ram:
+            if (.maxmem // 0) > 0
+            then ((.mem // 0) / .maxmem * 100)
+            else 0
+            end;
+
+        def avg($values):
+            if ($values | length) == 0
+            then 0
+            else ($values | add / length)
+            end;
+
+        def maxv($values):
+            if ($values | length) == 0
+            then 0
+            else ($values | max)
+            end;
+
+        . as $all |
+
+        ($all | map(cpu)) as $cpu_values |
+        ($all | map(ram)) as $ram_values |
+        ($all | map(.diskread // 0)) as $read_values |
+        ($all | map(.diskwrite // 0)) as $write_values |
+
+        {
+            cpu_avg: avg($cpu_values),
+            cpu_max: maxv($cpu_values),
+
+            ram_avg: avg($ram_values),
+            ram_max: maxv($ram_values),
+
+            read_avg: avg($read_values),
+            read_max: maxv($read_values),
+
+            write_avg: avg($write_values),
+            write_max: maxv($write_values),
+
+            cpu_graph: [
+                range(0; 12) as $i |
+                (
+                    $all
+                    | map(select(
+                        .time >= ($start + ($i * 7200)) and
+                        .time < ($start + (($i + 1) * 7200))
+                    ))
+                    | map(cpu)
+                    | avg(.)
+                )
+            ],
+
+            ram_graph: [
+                range(0; 12) as $i |
+                (
+                    $all
+                    | map(select(
+                        .time >= ($start + ($i * 7200)) and
+                        .time < ($start + (($i + 1) * 7200))
+                    ))
+                    | map(ram)
+                    | avg(.)
+                )
+            ],
+
+            read_graph: [
+                range(0; 12) as $i |
+                (
+                    $all
+                    | map(select(
+                        .time >= ($start + ($i * 7200)) and
+                        .time < ($start + (($i + 1) * 7200))
+                    ))
+                    | map(.diskread // 0)
+                    | avg(.)
+                )
+            ],
+
+            write_graph: [
+                range(0; 12) as $i |
+                (
+                    $all
+                    | map(select(
+                        .time >= ($start + ($i * 7200)) and
+                        .time < ($start + (($i + 1) * 7200))
+                    ))
+                    | map(.diskwrite // 0)
+                    | avg(.)
+                )
+            ]
+        }
+    ' <<< "$filtered_rrd")
+
+
+    local cpu_avg
+    local cpu_max
+    local ram_avg
+    local ram_max
+    local read_avg
+    local read_max
+    local write_avg
+    local write_max
+
+    cpu_avg=$(jq -r '.cpu_avg' <<< "$summary")
+    cpu_max=$(jq -r '.cpu_max' <<< "$summary")
+
+    ram_avg=$(jq -r '.ram_avg' <<< "$summary")
+    ram_max=$(jq -r '.ram_max' <<< "$summary")
+
+    read_avg=$(jq -r '.read_avg' <<< "$summary")
+    read_max=$(jq -r '.read_max' <<< "$summary")
+
+    write_avg=$(jq -r '.write_avg' <<< "$summary")
+    write_max=$(jq -r '.write_max' <<< "$summary")
+
+
+    # ------------------------------------------------------------
+    # 12칸 그래프
+    # ------------------------------------------------------------
+
+    local cpu_values
+    local ram_values
+    local read_values
+    local write_values
+
+    cpu_values=$(jq -r '.cpu_graph | join(" ")' <<< "$summary")
+    ram_values=$(jq -r '.ram_graph | join(" ")' <<< "$summary")
+    read_values=$(jq -r '.read_graph | join(" ")' <<< "$summary")
+    write_values=$(jq -r '.write_graph | join(" ")' <<< "$summary")
+
+
+    local cpu_graph
+    local ram_graph
+    local read_graph
+    local write_graph
+
+    cpu_graph=$(make_percent_graph "$cpu_values")
+    ram_graph=$(make_percent_graph "$ram_values")
+
+    read_graph=$(make_relative_graph "$read_values" "$read_max")
+    write_graph=$(make_relative_graph "$write_values" "$write_max")
+
+
+    # ------------------------------------------------------------
+    # 특이사항
+    #
+    # 반드시 24시간 전체 평균을 먼저 계산하고,
+    # 그 고정된 평균을 기준으로 급증 여부를 판정한다.
+    # ------------------------------------------------------------
+
+    local detail_output
+
+    detail_output=$(jq -r \
+        --argjson cpu_avg "$cpu_avg" \
+        --argjson ram_avg "$ram_avg" \
+        --argjson read_avg "$read_avg" \
+        --argjson write_avg "$write_avg" '
+
         .[]
         | [
             (.time // 0),
-            (.cpu // 0),
-            (.maxcpu // 0),
-            (.mem // 0),
-            (.maxmem // 0),
+
+            (
+                if (.maxcpu // 0) > 0
+                then ((.cpu // 0) / .maxcpu * 100)
+                else 0
+                end
+            ),
+
+            (
+                if (.maxmem // 0) > 0
+                then ((.mem // 0) / .maxmem * 100)
+                else 0
+                end
+            ),
+
             (.diskread // 0),
             (.diskwrite // 0)
         ]
         | @tsv
-    ' <<< "${rrd:-[]}" |
+    ' <<< "$filtered_rrd" |
     awk \
-        -v start="$start_time" \
-        -v end="$end_time" '
+        -v cpu_avg="$cpu_avg" \
+        -v ram_avg="$ram_avg" \
+        -v read_avg="$read_avg" \
+        -v write_avg="$write_avg" '
 
         function rate(bytes) {
+
             if (bytes >= 1024*1024*1024)
                 return sprintf("%.1f GB/s", bytes/1024/1024/1024)
 
@@ -1420,61 +1629,8 @@ build_guest_activity_report() {
             return sprintf("%.0f B/s", bytes)
         }
 
-        function percent(value) {
-            if (value < 0)
-                value = 0
 
-            if (value > 100)
-                value = 100
-
-            return value
-        }
-
-        function flush_group(    reason, i) {
-
-            if (!group_active)
-                return
-
-            reason = ""
-
-            if (cpu_spike)
-                reason = reason "CPU, "
-
-            if (ram_spike)
-                reason = reason "RAM, "
-
-            if (read_spike)
-                reason = reason "Read, "
-
-            if (write_spike)
-                reason = reason "Write, "
-
-            sub(/, $/, "", reason)
-
-            printf "🕐 %s~%s %s 급증\n",
-                strftime("%H:%M", group_start),
-                strftime("%H:%M", group_end),
-                reason
-
-            if (cpu_spike)
-                printf "CPU 평균 %.1f%% · 최대 %.1f%%\n",
-                    cpu_sum / cpu_count,
-                    cpu_peak
-
-            if (ram_spike)
-                printf "RAM 평균 %.1f%% · 최대 %.1f%%\n",
-                    ram_sum / ram_count,
-                    ram_peak
-
-            if (read_spike)
-                printf "Read 평균 %s · 최대 %s\n",
-                    rate(read_sum / read_count),
-                    rate(read_peak)
-
-            if (write_spike)
-                printf "Write 평균 %s · 최대 %s\n",
-                    rate(write_sum / write_count),
-                    rate(write_peak)
+        function reset_group() {
 
             group_active = 0
 
@@ -1502,27 +1658,86 @@ build_guest_activity_report() {
             write_peak = 0
         }
 
+
+        function flush_group(    reason) {
+
+            if (!group_active)
+                return
+
+            reason = ""
+
+            if (cpu_spike)
+                reason = reason "CPU, "
+
+            if (ram_spike)
+                reason = reason "RAM, "
+
+            if (read_spike)
+                reason = reason "Read, "
+
+            if (write_spike)
+                reason = reason "Write, "
+
+            sub(/, $/, "", reason)
+
+
+            if (group_start == group_end) {
+
+                printf "🕐 %s %s 급증\n",
+                    strftime("%H:%M", group_start),
+                    reason
+
+            } else {
+
+                printf "🕐 %s~%s %s 급증\n",
+                    strftime("%H:%M", group_start),
+                    strftime("%H:%M", group_end),
+                    reason
+            }
+
+
+            if (cpu_spike)
+                printf "CPU 평균 %.1f%% · 최대 %.1f%%\n",
+                    cpu_sum / cpu_count,
+                    cpu_peak
+
+
+            if (ram_spike)
+                printf "RAM 평균 %.1f%% · 최대 %.1f%%\n",
+                    ram_sum / ram_count,
+                    ram_peak
+
+
+            if (read_spike)
+                printf "Read 평균 %s · 최대 %s\n",
+                    rate(read_sum / read_count),
+                    rate(read_peak)
+
+
+            if (write_spike)
+                printf "Write 평균 %s · 최대 %s\n",
+                    rate(write_sum / write_count),
+                    rate(write_peak)
+
+
+            reset_group()
+        }
+
+
+        BEGIN {
+            reset_group()
+            previous_time = 0
+        }
+
+
         {
+
             timestamp = $1
+            cpu = $2
+            ram = $3
+            read = $4
+            write = $5
 
-            if (timestamp < start || timestamp >= end)
-                next
-
-            maxcpu = $3
-            maxmem = $5
-
-            if (maxcpu > 0)
-                cpu = ($2 / maxcpu) * 100
-            else
-                cpu = 0
-
-            if (maxmem > 0)
-                ram = ($4 / maxmem) * 100
-            else
-                ram = 0
-
-            read = $6
-            write = $7
 
             if (read < 0)
                 read = 0
@@ -1530,92 +1745,64 @@ build_guest_activity_report() {
             if (write < 0)
                 write = 0
 
-            # ------------------------------------------------
-            # 전체 평균/최대
-            # ------------------------------------------------
 
-            cpu_total += cpu
-            ram_total += ram
-            read_total += read
-            write_total += write
+            cpu_is_spike = 0
+            ram_is_spike = 0
+            read_is_spike = 0
+            write_is_spike = 0
 
-            total_count++
 
-            if (cpu > cpu_max)
-                cpu_max = cpu
+            # CPU
+            if (cpu >= 5)
+                cpu_is_spike = 1
 
-            if (ram > ram_max)
-                ram_max = ram
 
-            if (read > read_max)
-                read_max = read
+            # RAM
+            if (ram_avg > 0 && ram > ram_avg * 10)
+                ram_is_spike = 1
 
-            if (write > write_max)
-                write_max = write
 
-            # ------------------------------------------------
-            # 2시간 단위 그래프
-            # ------------------------------------------------
+            # Read
+            if (read_avg > 0 &&
+                read > read_avg * 10 &&
+                read >= 1024*1024)
+                read_is_spike = 1
 
-            bucket = int((timestamp - start) / 7200)
 
-            if (bucket < 0)
-                bucket = 0
+            # Write
+            if (write_avg > 0 &&
+                write > write_avg * 10 &&
+                write >= 1024*1024)
+                write_is_spike = 1
 
-            if (bucket > 11)
-                bucket = 11
 
-            bucket_cpu_sum[bucket] += cpu
-            bucket_ram_sum[bucket] += ram
-            bucket_read_sum[bucket] += read
-            bucket_write_sum[bucket] += write
+            any_spike = 0
 
-            bucket_count[bucket]++
-
-            # ------------------------------------------------
-            # 급증 판정
-            # ------------------------------------------------
-
-            cpu_is_spike = (cpu >= 5)
-
-            ram_is_spike = (
-                ram_total > 0 &&
-                ram > (ram_total / total_count) * 10
-            )
-
-            read_is_spike = (
-                read_total > 0 &&
-                read > (read_total / total_count) * 10 &&
-                read >= 1024*1024
-            )
-
-            write_is_spike = (
-                write_total > 0 &&
-                write > (write_total / total_count) * 10 &&
-                write >= 1024*1024
-            )
-
-            any_spike = (
-                cpu_is_spike ||
+            if (cpu_is_spike ||
                 ram_is_spike ||
                 read_is_spike ||
-                write_is_spike
-            )
+                write_is_spike)
+                any_spike = 1
+
 
             # ------------------------------------------------
-            # 급증 그룹 처리
+            # 급증 그룹 시작/연결
             # ------------------------------------------------
 
             if (any_spike) {
 
-                if (group_active) {
-                    # 2분 이상 끊기면 새로운 그룹
-                    if (timestamp - previous_time > 120)
-                        flush_group()
+                if (group_active &&
+                    previous_time > 0 &&
+                    timestamp - previous_time > 120) {
+
+                    flush_group()
                 }
 
+
                 if (!group_active) {
+
                     group_active = 1
+
                     group_start = timestamp
                     group_end = timestamp
 
@@ -1640,9 +1827,12 @@ build_guest_activity_report() {
                     write_peak = 0
                 }
 
+
                 group_end = timestamp
 
+
                 if (cpu_is_spike) {
+
                     cpu_spike = 1
                     cpu_sum += cpu
                     cpu_count++
@@ -1651,7 +1841,9 @@ build_guest_activity_report() {
                         cpu_peak = cpu
                 }
 
+
                 if (ram_is_spike) {
+
                     ram_spike = 1
                     ram_sum += ram
                     ram_count++
@@ -1660,7 +1852,9 @@ build_guest_activity_report() {
                         ram_peak = ram
                 }
 
+
                 if (read_is_spike) {
+
                     read_spike = 1
                     read_sum += read
                     read_count++
@@ -1669,7 +1863,9 @@ build_guest_activity_report() {
                         read_peak = read
                 }
 
+
                 if (write_is_spike) {
+
                     write_spike = 1
                     write_sum += write
                     write_count++
@@ -1683,8 +1879,10 @@ build_guest_activity_report() {
                 flush_group()
             }
 
+
             previous_time = timestamp
         }
+
 
         END {
 
@@ -1693,160 +1891,10 @@ build_guest_activity_report() {
         }
     ')
 
-    local detail_output="$result"
 
-    local summary
-
-    summary=$(jq -r '
-        def avg($field):
-            if length == 0 then 0
-            else (map(.[$field] // 0) | add / length)
-            end;
-
-        def maxv($field):
-            if length == 0 then 0
-            else (map(.[$field] // 0) | max)
-            end;
-
-        def cpu:
-            if (.maxcpu // 0) > 0
-            then ((.cpu // 0) / .maxcpu * 100)
-            else 0
-            end;
-
-        def ram:
-            if (.maxmem // 0) > 0
-            then ((.mem // 0) / .maxmem * 100)
-            else 0
-            end;
-
-        . as $all
-
-        | {
-            cpu_avg: (
-                if length == 0 then 0
-                else (map(cpu) | add / length)
-                end
-            ),
-            cpu_max: (
-                if length == 0 then 0
-                else (map(cpu) | max)
-                end
-            ),
-            ram_avg: (
-                if length == 0 then 0
-                else (map(ram) | add / length)
-                end
-            ),
-            ram_max: (
-                if length == 0 then 0
-                else (map(ram) | max)
-                end
-            ),
-            read_avg: avg("diskread"),
-            read_max: maxv("diskread"),
-            write_avg: avg("diskwrite"),
-            write_max: maxv("diskwrite"),
-
-            cpu_graph: [
-                range(0; 12) as $i
-                | (
-                    $all
-                    | map(select(
-                        .time >= ($start + ($i * 7200)) and
-                        .time < ($start + (($i + 1) * 7200))
-                    ))
-                    | if length == 0 then 0
-                      else (map(cpu) | add / length)
-                      end
-                )
-            ],
-
-            ram_graph: [
-                range(0; 12) as $i
-                | (
-                    $all
-                    | map(select(
-                        .time >= ($start + ($i * 7200)) and
-                        .time < ($start + (($i + 1) * 7200))
-                    ))
-                    | if length == 0 then 0
-                      else (map(ram) | add / length)
-                      end
-                )
-            ],
-
-            read_graph: [
-                range(0; 12) as $i
-                | (
-                    $all
-                    | map(select(
-                        .time >= ($start + ($i * 7200)) and
-                        .time < ($start + (($i + 1) * 7200))
-                    ))
-                    | if length == 0 then 0
-                      else (map(.diskread // 0) | add / length)
-                      end
-                )
-            ],
-
-            write_graph: [
-                range(0; 12) as $i
-                | (
-                    $all
-                    | map(select(
-                        .time >= ($start + ($i * 7200)) and
-                        .time < ($start + (($i + 1) * 7200))
-                    ))
-                    | if length == 0 then 0
-                      else (map(.diskwrite // 0) | add / length)
-                      end
-                )
-            ]
-        }
-    ' --argjson start "$start_time" <<< "${rrd:-[]}")
-
-    local cpu_avg
-    local cpu_max
-    local ram_avg
-    local ram_max
-    local read_avg
-    local read_max
-    local write_avg
-    local write_max
-
-    cpu_avg=$(jq -r '.cpu_avg' <<< "$summary")
-    cpu_max=$(jq -r '.cpu_max' <<< "$summary")
-
-    ram_avg=$(jq -r '.ram_avg' <<< "$summary")
-    ram_max=$(jq -r '.ram_max' <<< "$summary")
-
-    read_avg=$(jq -r '.read_avg' <<< "$summary")
-    read_max=$(jq -r '.read_max' <<< "$summary")
-
-    write_avg=$(jq -r '.write_avg' <<< "$summary")
-    write_max=$(jq -r '.write_max' <<< "$summary")
-
-    local cpu_values
-    local ram_values
-    local read_values
-    local write_values
-
-    cpu_values=$(jq -r '.cpu_graph | join(" ")' <<< "$summary")
-    ram_values=$(jq -r '.ram_graph | join(" ")' <<< "$summary")
-    read_values=$(jq -r '.read_graph | join(" ")' <<< "$summary")
-    write_values=$(jq -r '.write_graph | join(" ")' <<< "$summary")
-
-    local cpu_graph
-    local ram_graph
-    local read_graph
-    local write_graph
-
-    cpu_graph=$(make_percent_graph "$cpu_values")
-    ram_graph=$(make_percent_graph "$ram_values")
-
-    read_graph=$(make_relative_graph "$read_values" "$read_max")
-    write_graph=$(make_relative_graph "$write_values" "$write_max")
+    # ------------------------------------------------------------
+    # 최종 메시지
+    # ------------------------------------------------------------
 
     local message=""
 
@@ -1872,8 +1920,8 @@ build_guest_activity_report() {
     message+="Write (평균 $(format_activity_rate "$write_avg") · 최대 $(format_activity_rate "$write_max"))"
     message+=$'\n'
     message+="${write_graph}"
-    message+=$'\n'
 
+    message+=$'\n'
     message+="-----------------------"
     message+=$'\n'
     message+="⚠️ 특이사항"
@@ -1884,6 +1932,7 @@ build_guest_activity_report() {
     else
         message+="특이사항 없음"
     fi
+
 
     printf '%s' "$message"
 }
