@@ -3,13 +3,13 @@
 # pve-telegram-monitor.sh
 #
 # Proxmox VE Telegram Monitor
-# Version: 1.6.2
+# Version: 1.6.3
 #
 
 set -u
 set -o pipefail
 
-VERSION="1.6.2"
+VERSION="1.6.3"
 
 CONFIG_DIR="/etc/pve-telegram-monitor"
 CONFIG_FILE="${CONFIG_DIR}/config"
@@ -1908,18 +1908,22 @@ build_guest_activity_report() {
     message+="CPU (평균 $(printf '%.1f' "$cpu_avg")% · 최대 $(printf '%.1f' "$cpu_max")%)"
     message+=$'\n'
     message+="${cpu_graph}"
-
+    message+=$'\n'
+    
     message+="RAM (평균 $(printf '%.1f' "$ram_avg")% · 최대 $(printf '%.1f' "$ram_max")%)"
     message+=$'\n'
     message+="${ram_graph}"
+    message+=$'\n'
 
     message+="Read (평균 $(format_activity_rate "$read_avg") · 최대 $(format_activity_rate "$read_max"))"
     message+=$'\n'
     message+="${read_graph}"
+    message+=$'\n'
 
     message+="Write (평균 $(format_activity_rate "$write_avg") · 최대 $(format_activity_rate "$write_max"))"
     message+=$'\n'
     message+="${write_graph}"
+    message+=$'\n'
 
     message+=$'\n'
     message+="-----------------------"
